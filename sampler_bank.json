@@ -1,0 +1,56 @@
+{
+    "samplers": [
+        {
+            "name": "Synth",
+            "samples": [
+                {
+                    "filepath": "test_samples/synth/c3.wav",
+                    "midi_note": 48
+                },
+                {
+                    "filepath": "test_samples/synth/c4.wav",
+                    "midi_note": 60
+                },
+                {
+                    "filepath": "test_samples/synth/c5.wav",
+                    "midi_note": 72
+                }
+            ]
+        },
+        {
+            "name": "Organ",
+            "samples": [
+                {
+                    "filepath": "test_samples/organ/A1.wav",
+                    "midi_note": 33
+                },
+                {
+                    "filepath": "test_samples/organ/D3.wav",
+                    "midi_note": 50
+                },
+                {
+                    "filepath": "test_samples/organ/F3.wav",
+                    "midi_note": 53
+                }
+            ]
+        },
+        {
+            "name": "Egg",
+            "samples": [
+                {
+                    "filepath": "egg.wav",
+                    "midi_note": 60
+                }
+            ]
+        },
+        {
+            "name": "Bell",
+            "samples": [
+                {
+                    "filepath": "test_samples/bell/Alesis-Sanctuary-QCard-Loose-Bell-C5.wav",
+                    "midi_note": 72
+                }
+            ]
+        }
+    ]
+}

@@ -8,3 +8,10 @@ edition = "2021"
 [dependencies]
 cpal = "0.14.0"
 wav = "1.0.0"
+nodi = "0.19.2"
+serde = { version = "1.0.144", features = ["derive"] }
+serde_json = "1.0.85"
+rubato = "0.12.0"
+ringbuf = "0.2.8"
+chrono = "0.4.22"
+timer = "0.2.0"
