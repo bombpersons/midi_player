@@ -4,7 +4,7 @@ use std::mem::take;
 use std::sync::mpsc::{Receiver, channel, Sender};
 use std::thread::{JoinHandle, self};
 use std::time::{Instant, Duration};
-use std::{io};
+use std::{io, fs};
 use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::hash::Hash;
@@ -58,7 +58,7 @@ struct WavData {
 
 impl WavData {
     pub fn from_file(filepath: &Path) -> Result<Self, WavDataError> {
-        println!("Loading {}", filepath.display());
+        log::info!("Loading {}", filepath.display());
 
         // Open the file...
         let mut file = File::open(filepath)?;
@@ -110,7 +110,7 @@ impl WavData {
     }
 
     pub fn resample(&self, new_sample_rate: u16) -> Result<Self, WavDataError> {
-        println!("Resampling from {} samples per second to {} samples per second...", self.sample_rate, new_sample_rate);
+        log::info!("Resampling from {} samples per second to {} samples per second...", self.sample_rate, new_sample_rate);
 
         // Create the resampler...
         // I have no idea what these options really do, just using the ones used on the readme.
@@ -151,7 +151,7 @@ impl WavData {
             sample_rate: new_sample_rate
         };
 
-        println!("Resampled.");
+        log::info!("Resampled.");
 
         Ok(new)
     }
@@ -294,7 +294,7 @@ impl Sampler {
         Ok(())
     }
 
-    pub fn get_sample(&mut self, output_sample_rate: u16, midi_note: u8, progress: usize, channel: u8) -> Result<f32, SamplerError> {
+    pub fn get_sample(&self, output_sample_rate: u16, midi_note: u8, progress: usize, channel: u8) -> Result<f32, SamplerError> {
         // Pick the sample with the closest midi note.
         let mut closest_sample = None;
         for sample in self.samples.iter() {
@@ -319,7 +319,7 @@ impl Sampler {
         let sample_length = sample.get_sample_length()?;
 
         if output_sample_rate != sample_rate {
-            println!("Sample rate of output doesn't match the input! Re-sample to match before playing.");
+            log::info!("Sample rate of output doesn't match the input! Re-sample to match before playing.");
             return Err(SamplerError::MismatchedSampleRates);
         }
 
@@ -357,7 +357,7 @@ impl Sampler {
         let sample_length = sample.get_sample_length()?;
 
         if output_sample_rate != sample_rate {
-            println!("Sample rate of output doesn't match the input! Re-sample to match before playing.");
+            log::info!("Sample rate of output doesn't match the input! Re-sample to match before playing.");
             return Err(SamplerError::MismatchedSampleRates);
         }
 
@@ -421,7 +421,12 @@ impl From<SamplerError> for SamplerBankError {
 
 #[derive(Serialize, Deserialize)]
 pub struct SamplerBank {
-    samplers: Vec<Sampler>
+    #[serde(skip_serializing)]
+    #[serde(skip_deserializing)]
+    samplers: Vec<Sampler>,
+
+    voices: Vec<String>,
+    folder: String
 }
 
 impl SamplerBank {
@@ -433,7 +438,37 @@ impl SamplerBank {
 
     pub fn from_json_reader<T: Read>(reader: T) -> Result<Self, SamplerBankError> {
         // Try and parse it.
-        let parsed: Self = serde_json::from_reader(reader)?;
+        let mut parsed: Self = serde_json::from_reader(reader)?;
+
+        // Automatically find the samples in the folder.
+        let paths = fs::read_dir(&parsed.folder)?;
+        for sampler_dir_result in paths {
+            let sampler_dir = sampler_dir_result?;
+            let mut sampler = Sampler {
+                name: sampler_dir.path().file_stem().unwrap().to_str().unwrap().to_string(),
+                samples: Vec::new()
+            };
+
+            let samples = fs::read_dir(sampler_dir.path())?;
+            for sample_file_result in samples {
+                let sample_file = sample_file_result?;
+                if let Some(ext) = sample_file.path().extension() {
+                    if ext.to_str().unwrap() != "wav" {
+                        continue;
+                    }
+
+                    let name = sample_file.path().file_stem().unwrap().to_str().unwrap().to_string();
+                    let sample = Sample {
+                        data: None,
+                        filepath: sample_file.path(),
+                        midi_note: midi::note_name_to_midi_note(name.as_str()).unwrap()
+                    };
+                    sampler.samples.push(sample);
+                }
+            }
+            parsed.samplers.push(sampler);
+        }
+
         Ok(parsed)
     }
 
@@ -473,15 +508,13 @@ impl SamplerSynthOutput {
                 return sampled;
             }
 
-            //println!("Synth buffer remaining: {}", self.consumer.remaining());
-
             // *Should* be safe to just pop off a frame worth of samples.
             let mut synth_frame = Vec::new();
             for i in 0..self.channel_count {
                 synth_frame.push(self.consumer.pop().unwrap())
             }
 
-            //println!("{:?}", synth_frame);
+            //log::info!("{:?}", synth_frame);
 
             // Get the data from each channel.
             // If there are more channels in the sample than in the output,
@@ -514,7 +547,7 @@ impl Tracks {
     }
 
     pub fn note_on(&mut self, key: u7, vel: u7, channel: u4) {
-        //println!("Adding {} to channel {}...", key, channel);
+        log::info!("Adding {} to channel {}...", key, channel);
 
         // Create a new note and add it to the appropriate track.
         let note = Note {
@@ -528,7 +561,7 @@ impl Tracks {
     }
 
     pub fn note_off(&mut self, key: u7, channel: u4) {
-        //println!("Removing {} from channel {}...", key, channel);
+        log::info!("Removing {} from channel {}...", key, channel);
 
         // Find the note and remove it.
         self.tracks.get_mut(&channel)
@@ -569,68 +602,6 @@ impl SamplerSynth {
     }
 
     fn create_synth_thread(mut sampler_bank: SamplerBank, sample_rate: usize, channel_count: usize, receiver: Receiver<MidiEvent>, mut producer: ringbuf::Producer<f32>) -> JoinHandle<()> {
-        // let sample_duration = 1.0 / sample_rate as f32;
-        // let sampler_timer = Timer::new();
-
-        // // A list of tracks that contain a list of notes that are currently playing.
-        // let mut tracks = Tracks::new();
-        // let guard = sampler_timer.schedule_repeating(chrono::Duration::nanoseconds((sample_duration * 1000000000.0) as i64), move || {
-        //     match receiver.try_recv() {
-        //         Err(e) => (), // No messages.
-        //         Ok(event) => {
-        //             let message = event.message;
-                    
-        //             match message {
-        //                 MidiMessage::NoteOn { key, vel } => {
-        //                     // The midi specs say that a NoteOn message with a velocity of 0
-        //                     // should be treated the same as a NoteOff message.
-        //                     if vel > 0 {
-        //                         tracks.note_on(key, vel, event.channel);
-        //                     } else {
-        //                         tracks.note_off(key, event.channel);
-        //                     }
-        //                 },
-        //                 MidiMessage::NoteOff { key, vel } => {
-        //                     tracks.note_off(key, event.channel);
-        //                 },
-        //                 _ => ()
-        //             }   
-        //         }
-        //     }
-
-        //     // Generate all the samples we need.
-        //     let mut samples_produced = 0;
-        //     for sample_count in 0..1 {
-        //         // If the buffer is full we need to wait.
-        //         if producer.remaining() < channel_count {
-        //             println!("Buffer full!");
-        //             break;
-        //         }
-
-        //         // For each output channel.
-        //         for output_channel in 0..channel_count {
-        //             let mut sample = 0.0;
-        //             tracks.for_each_note(&mut |midi_note, note, channel| {
-        //                 let note_sample = sampler_bank.samplers[0].get_sample(
-        //                     sample_rate as u16, midi_note.as_int(), note.samples_played, output_channel as u8)
-        //                         .unwrap_or(0.0);
-
-        //                 let attenuated = note_sample * (note.velocity as f32 / 127.0);
-        //                 sample += attenuated;
-                        
-        //                 // Increment the amount of samples the note has played.
-        //                 note.samples_played += 1;
-        //             });
-
-        //             producer.push(sample);
-        //         }
-
-        //         samples_produced += 1;
-        //     }
-
-        // });
-        // guard
-
         let thread = thread::spawn(move || {
             // A list of tracks that contain a list of notes that are currently playing.
             let mut tracks = Tracks::new();
@@ -641,40 +612,61 @@ impl SamplerSynth {
             let sample_duration = 1.0 / sample_rate as f32;
 
             loop { 
-                match receiver.try_recv() {
-                    Err(e) => (), // No messages.
-                    Ok(event) => {
-                        let message = event.message;
-                        
-                        match message {
-                            MidiMessage::NoteOn { key, vel } => {
-                                // The midi specs say that a NoteOn message with a velocity of 0
-                                // should be treated the same as a NoteOff message.
-                                if vel > 0 {
-                                    tracks.note_on(key, vel, event.channel);
-                                } else {
-                                    tracks.note_off(key, event.channel);
-                                }
-                            },
-                            MidiMessage::NoteOff { key, vel } => {
+                // match receiver.recv_timeout(Duration::from_secs(1)) {
+                //     Err(_) => (),
+                //     Ok(event) => {
+                //         let message = event.message;
+                //         match message {
+                //             MidiMessage::NoteOn { key, vel } => {
+                //                 // The midi specs say that a NoteOn message with a velocity of 0
+                //                 // should be treated the same as a NoteOff message.
+                //                 if vel > 0 {
+                //                     tracks.note_on(key, vel, event.channel);
+                //                 } else {
+                //                     tracks.note_off(key, event.channel);
+                //                 }
+                //             },
+                //             MidiMessage::NoteOff { key, vel } => {
+                //                 tracks.note_off(key, event.channel);
+                //             },
+                //             _ => ()
+                //         }
+                //     }
+                // }
+
+                for event in receiver.try_iter() {
+                    let message = event.message;
+                    match message {
+                        MidiMessage::NoteOn { key, vel } => {
+                            // The midi specs say that a NoteOn message with a velocity of 0
+                            // should be treated the same as a NoteOff message.
+                            if vel > 0 {
+                                tracks.note_on(key, vel, event.channel);
+                            } else {
                                 tracks.note_off(key, event.channel);
-                            },
-                            _ => ()
-                        }   
+                            }
+                        },
+                        MidiMessage::NoteOff { key, vel } => {
+                            tracks.note_off(key, event.channel);
+                        },
+                        _ => ()
                     }
                 }
 
-                //println!("Remaining: {}", producer.remaining());
-                thread::sleep(Duration::from_secs_f32(sample_duration * 1.0));
+                log::info!("Remaining: {}", producer.remaining());
+                thread::sleep(Duration::from_secs_f32(sample_duration * 100.0));
                 let samples_needed = (time.elapsed().as_secs_f32() * sample_rate as f32).floor() as usize;
                 let samples_to_produce = samples_needed - samples_processed;
+                if samples_to_produce == 0 {
+                    continue;
+                }
 
                 // Generate all the samples we need.
                 let mut samples_produced = 0;
                 for sample_count in 0..samples_to_produce {
                     // If the buffer is full we need to wait.
                     if producer.remaining() < channel_count {
-                        println!("Buffer full!");
+                        log::info!("Buffer full!");
                         break;
                     }
 
@@ -682,7 +674,11 @@ impl SamplerSynth {
                     for output_channel in 0..channel_count {
                         let mut sample = 0.0;
                         tracks.for_each_note(&mut |midi_note, note, channel| {
-                            let note_sample = sampler_bank.samplers[0].get_sample(
+                            let voice_index = (channel.as_int() as usize).min(sampler_bank.voices.len()-1);
+                            let voice_name = sampler_bank.voices[voice_index].as_str();
+                            let default_sampler = sampler_bank.samplers.iter().find(|&n| n.name == voice_name).unwrap();
+
+                            let note_sample = default_sampler.get_sample(
                                 sample_rate as u16, midi_note.as_int(), note.samples_played, output_channel as u8)
                                     .unwrap_or(0.0);
 
@@ -710,7 +706,6 @@ impl SamplerSynth {
 
 impl Connection for SamplerSynth {
     fn play(&mut self, event: nodi::MidiEvent) -> bool {
-        //println!("{:?}", event);
         self.message_sender.send(event);
         true
     }

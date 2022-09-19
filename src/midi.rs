@@ -1,4 +1,4 @@
-use std::{path::Path, path::PathBuf, fs::{File}, io::Read, thread::{self, JoinHandle}, sync::Arc};
+use std::{path::Path, path::PathBuf, fs::{File}, io::Read, thread::{self, JoinHandle}, sync::Arc, collections::HashMap, num::ParseIntError};
 use std::{io};
 use std::sync::mpsc::{Receiver, channel, Sender};
 
@@ -11,6 +11,52 @@ const RING_BUF_SIZE: usize = 2000;
 pub fn midi_note_to_freq(note: u8) -> f32 {
     const a: f32 = 440.0;
     (a / 32.0) * f32::powf(2.0, (note as f32 - 9.0) / 12.0)
+}
+
+#[derive(Debug)]
+pub enum NoteNameToMidiError {
+    ParseIntError(ParseIntError),
+    NameIncorrectLength,
+    InvalidNoteName
+}
+
+impl From<ParseIntError> for NoteNameToMidiError {
+    fn from(e: ParseIntError) -> Self {
+        Self::ParseIntError(e)
+    }
+}
+
+pub fn note_name_to_midi_note(name: &str) -> Result<u8, NoteNameToMidiError> {
+    const A0: u8 = 21;
+    let (letter_to_check, octave) = match name.len() {
+        3 => {
+            let o = &name[2..3];
+            (&name[0..2], o.parse::<u8>()?)
+        },
+        2 => {
+            let o = &name[1..2];
+            (&name[0..1], o.parse::<u8>()?)
+        },
+        _ => Err(NoteNameToMidiError::NameIncorrectLength)?
+    };
+
+    let offset = match letter_to_check {
+        "a" => 0,
+        "a#" => 1,
+        "b" => 2,
+        "c" => 3,
+        "c#" => 4,
+        "d" => 5,
+        "d#" => 6,
+        "e" => 7,
+        "f" => 8,
+        "f#" => 9,
+        "g" => 10,
+        "g#" => 11,
+        _ => Err(NoteNameToMidiError::InvalidNoteName)?
+    };
+
+    Ok(octave * 12 + offset + A0)
 }
 
 pub enum Command {
@@ -65,7 +111,7 @@ impl MidiPlayer {
     }
 
     fn actual_load_from_file(filepath: &Path, timer: &mut Ticker, sheet: &mut Option<Sheet>) -> Result<(), MidiPlayerError> {
-        println!("Loading new midi file from filepath {}", filepath.display());
+        log::info!("Loading new midi file from filepath {}", filepath.display());
 
         let mut file = File::open(filepath)?;
         let mut midi_bytes = Vec::new();
@@ -89,7 +135,7 @@ impl MidiPlayer {
         for event in &moment.events {
             match event {
                 Event::Tempo(val) => {
-                    println!("tempo changed {}", *val); 
+                    log::info!("tempo changed {}", *val); 
                     timer.change_tempo(*val)
                 },
                 Event::Midi(msg) => {
@@ -99,12 +145,12 @@ impl MidiPlayer {
             }
         }
 
-        //println!("{:?}", moment);
+        //log::info!("{:?}", moment);
     }
 
     fn create_player_thread<C: Connection + Send + 'static>(receiver: Receiver<Command>, mut connection: C) -> JoinHandle<()> {
         let thread = thread::spawn(move || {
-            println!("Starting midi player...");
+            log::info!("Starting midi player...");
             let mut timer = Ticker::new(0);
             let mut sheet = None;
             let mut moment_index = 0;
@@ -115,24 +161,25 @@ impl MidiPlayer {
 
             loop {
                 // Get commands from outside the thread if there are any.
-                let command_result = match receiver.try_recv() {
-                    Err(_) => Ok(()), // Presumably if there isn't anything to recieve, this is what happens.
-                    Ok(Command::NewFromFile(filepath)) => { 
-                        Self::actual_load_from_file(&filepath, &mut timer, &mut sheet)
-                    },
-                    Ok(Command::NewFromBuf(buf)) => {
-                        Self::actual_load_from_buf(&buf, &mut timer, &mut sheet)
-                    },
-                    Ok(Command::Pause) => Ok(()),
-                    Ok(Command::Stop) => Ok(()),
-                    Ok(Command::Play) => {
-                        // If there is a sheet (a song), then set the moment to the beginning.
-                        moment_index = 0;
-                        paused = false; // Unpause if it we were paused.
-                        Ok(())
-                    }
-                };
-                command_result.unwrap();
+                for event in receiver.try_iter() {
+                    let command_result = match event {
+                        Command::NewFromFile(filepath) => { 
+                            Self::actual_load_from_file(&filepath, &mut timer, &mut sheet)
+                        },
+                        Command::NewFromBuf(buf) => {
+                            Self::actual_load_from_buf(&buf, &mut timer, &mut sheet)
+                        },
+                        Command::Pause => Ok(()),
+                        Command::Stop => Ok(()),
+                        Command::Play => {
+                            // If there is a sheet (a song), then set the moment to the beginning.
+                            moment_index = 0;
+                            paused = false; // Unpause if it we were paused.
+                            Ok(())
+                        }
+                    };
+                    command_result.unwrap();
+                }
 
                 if paused {
                     continue;
@@ -146,6 +193,7 @@ impl MidiPlayer {
                     if !moment.is_empty() {
                         // Sleep a tick.
                         timer.sleep(counter);
+                        log::info!("Slept {} ticks, {} seconds", counter, timer.sleep_duration(counter).as_secs_f32());
                         counter = 0;
 
                         // Process the moment.

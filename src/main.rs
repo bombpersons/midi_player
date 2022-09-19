@@ -1,13 +1,33 @@
 mod midi;
 mod sampler;
 
+use std::thread;
 use std::{path::Path, time::Duration, sync::Arc};
+use std::io::Write;
 
+use chrono::Local;
+use env_logger::Builder;
+use log::LevelFilter;
 use midi::MidiPlayer;
 use sampler::{Sampler, SamplerBank, SamplerSynth};
 use cpal::{traits::{HostTrait, DeviceTrait, StreamTrait}, Sample};
 
 fn main() {
+    Builder::new()
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "{} {}: {}",
+                record.level(),
+                //Format like you want to: <-----------------
+                Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                record.args()
+            )
+        })
+        .filter(None, LevelFilter::Info)
+        .init();
+    log::info!("Starting player...");
+
     // Default audio host.
     let host = cpal::default_host();
 
@@ -32,33 +52,27 @@ fn main() {
         SamplerSynth::new(test_bank, supported_config.sample_rate.0 as usize, supported_config.channels as usize, 1000000);
 
     let mut midi_player = MidiPlayer::new(sampler_synth).expect("Couldn't create new midi player.");
-    midi_player.load_from_file(Path::new("backstreet.mid"));
+    midi_player.load_from_file(Path::new("test.mid"));
     midi_player.play();
 
     // build the stream
     let stream = device.build_output_stream(
         &supported_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            // read / write to the stream here.
-            // for sample in data.iter_mut() {
-            //     *sample = Sample::from(&0.0);
-            // }
             let channel_count = supported_config.channels;
-            let sample_rate = supported_config.sample_rate.0;
 
             let mut written = 0;
             while written < data.len() {
                 written += sampler_synth_output.get_samples(channel_count as u8, &mut data[written..]);
-            } 
-
-            //println!("Wrote samples {:?}", data);
+            }
         },
         move |err| {
-            println!("error! {}", err);
+            log::info!("error! {}", err);
         }
     ).unwrap();
     stream.play().unwrap();
 
     loop {
+        thread::sleep(Duration::from_secs(1));
     }
 }

@@ -1,0 +1,14 @@
+{
+    "voices": [
+        "piano",
+        "violin",
+        "strings",
+        "bell",
+        "voice",
+        "violin",
+        "flute",
+        "voice",
+        "harp"
+    ],
+    "folder": "test_samples/current"
+}
