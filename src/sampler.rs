@@ -505,6 +505,7 @@ impl SamplerSynthOutput {
         for frame in output.chunks_exact_mut(output_channels as usize) {
             // If the synth hasn't produced at least a single frame of audio, then early quit with no output.
             if self.consumer.len() < self.channel_count {
+                log::info!("Not enough samples in buffer!");
                 return sampled;
             }
 
@@ -547,7 +548,7 @@ impl Tracks {
     }
 
     pub fn note_on(&mut self, key: u7, vel: u7, channel: u4) {
-        log::info!("Adding {} to channel {}...", key, channel);
+        //log::info!("Adding {} to channel {}...", key, channel);
 
         // Create a new note and add it to the appropriate track.
         let note = Note {
@@ -561,7 +562,7 @@ impl Tracks {
     }
 
     pub fn note_off(&mut self, key: u7, channel: u4) {
-        log::info!("Removing {} from channel {}...", key, channel);
+        //log::info!("Removing {} from channel {}...", key, channel);
 
         // Find the note and remove it.
         self.tracks.get_mut(&channel)
@@ -582,10 +583,12 @@ pub struct SamplerSynth {
     synth_thread: JoinHandle<()>
 }
 
+const SAMPLER_SYNTH_BUFFER_LENGTH: f32 = 0.1;
+
 impl SamplerSynth {
-    pub fn new(sampler_bank: SamplerBank, sample_rate: usize, channel_count: usize, buf_size: usize) -> (Self, SamplerSynthOutput) {
+    pub fn new(sampler_bank: SamplerBank, sample_rate: usize, channel_count: usize) -> (Self, SamplerSynthOutput) {
         // Ring buffer to store generated samples.
-        let ring_buf = RingBuffer::new(buf_size);
+        let ring_buf = RingBuffer::new((sample_rate as f32 * SAMPLER_SYNTH_BUFFER_LENGTH).floor() as usize);
         let (producer, consumer) = ring_buf.split();
 
         // A thread for the synth to generate samples in.
@@ -611,58 +614,40 @@ impl SamplerSynth {
             let mut time = Instant::now();
             let sample_duration = 1.0 / sample_rate as f32;
 
-            loop { 
-                // match receiver.recv_timeout(Duration::from_secs(1)) {
-                //     Err(_) => (),
-                //     Ok(event) => {
-                //         let message = event.message;
-                //         match message {
-                //             MidiMessage::NoteOn { key, vel } => {
-                //                 // The midi specs say that a NoteOn message with a velocity of 0
-                //                 // should be treated the same as a NoteOff message.
-                //                 if vel > 0 {
-                //                     tracks.note_on(key, vel, event.channel);
-                //                 } else {
-                //                     tracks.note_off(key, event.channel);
-                //                 }
-                //             },
-                //             MidiMessage::NoteOff { key, vel } => {
-                //                 tracks.note_off(key, event.channel);
-                //             },
-                //             _ => ()
-                //         }
-                //     }
-                // }
-
-                for event in receiver.try_iter() {
-                    let message = event.message;
-                    match message {
-                        MidiMessage::NoteOn { key, vel } => {
-                            // The midi specs say that a NoteOn message with a velocity of 0
-                            // should be treated the same as a NoteOff message.
-                            if vel > 0 {
-                                tracks.note_on(key, vel, event.channel);
-                            } else {
-                                tracks.note_off(key, event.channel);
-                            }
-                        },
-                        MidiMessage::NoteOff { key, vel } => {
+            let mut handle_event = |tracks: &mut Tracks, event: MidiEvent| {
+                let message = event.message;
+                match message {
+                    MidiMessage::NoteOn { key, vel } => {
+                        // The midi specs say that a NoteOn message with a velocity of 0
+                        // should be treated the same as a NoteOff message.
+                        if vel > 0 {
+                            tracks.note_on(key, vel, event.channel);
+                        } else {
                             tracks.note_off(key, event.channel);
-                        },
-                        _ => ()
-                    }
+                        }
+                    },
+                    MidiMessage::NoteOff { key, vel } => {
+                        tracks.note_off(key, event.channel);
+                    },
+                    _ => ()
                 }
+            };
 
-                log::info!("Remaining: {}", producer.remaining());
-                thread::sleep(Duration::from_secs_f32(sample_duration * 100.0));
+            loop { 
+                // Get the next midi event.
+                let received = receiver.recv_timeout(Duration::from_secs_f32(SAMPLER_SYNTH_BUFFER_LENGTH / 8.0));
+
+                //thread::sleep(Duration::from_secs_f32(sample_duration * 100.0));
                 let samples_needed = (time.elapsed().as_secs_f32() * sample_rate as f32).floor() as usize;
-                let samples_to_produce = samples_needed - samples_processed;
+                let mut samples_to_produce = samples_needed - samples_processed;
                 if samples_to_produce == 0 {
                     continue;
                 }
 
                 // Generate all the samples we need.
                 let mut samples_produced = 0;
+                samples_to_produce = (producer.remaining() / channel_count).min(samples_to_produce);
+
                 for sample_count in 0..samples_to_produce {
                     // If the buffer is full we need to wait.
                     if producer.remaining() < channel_count {
@@ -697,6 +682,21 @@ impl SamplerSynth {
 
                 // Reset the time.
                 samples_processed += samples_produced;
+
+                log::info!("Produced {} samples, buffer has {} samples remaining.", samples_produced, producer.remaining());
+
+                // Now process all of the samples up to the point just before the event received above.
+                match received {
+                    Err(RecvTimeoutError) => (), // Ok, we expect this.
+                    Err(e) => println!("error: {}", e),
+                    Ok(event) => {
+                        // Handle the event we just got and any others that we got at the same time.
+                        handle_event(&mut tracks, event);
+                        for event in receiver.try_iter() {
+                            handle_event(&mut tracks, event);
+                        }
+                    }
+                }
             }
         });
 

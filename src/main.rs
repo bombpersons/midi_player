@@ -43,16 +43,16 @@ fn main() {
         .expect("no configs!")
         .with_max_sample_rate().config();
 
-    let mut test_bank = SamplerBank::from_json_file(Path::new("sampler_bank.json")).unwrap();
+    let mut test_bank = SamplerBank::from_json_file(Path::new("sampler_bank_melody.json")).unwrap();
     test_bank.load_samplers().unwrap();
     test_bank.resample(supported_config.sample_rate.0 as u16);
 
     // load a test midi file.
     let (sampler_synth, mut sampler_synth_output) = 
-        SamplerSynth::new(test_bank, supported_config.sample_rate.0 as usize, supported_config.channels as usize, 1000000);
+        SamplerSynth::new(test_bank, supported_config.sample_rate.0 as usize, supported_config.channels as usize);
 
     let mut midi_player = MidiPlayer::new(sampler_synth).expect("Couldn't create new midi player.");
-    midi_player.load_from_file(Path::new("test.mid"));
+    midi_player.load_from_file(Path::new("ff9.mid"));
     midi_player.play();
 
     // build the stream

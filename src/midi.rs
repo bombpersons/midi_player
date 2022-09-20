@@ -193,7 +193,7 @@ impl MidiPlayer {
                     if !moment.is_empty() {
                         // Sleep a tick.
                         timer.sleep(counter);
-                        log::info!("Slept {} ticks, {} seconds", counter, timer.sleep_duration(counter).as_secs_f32());
+                        //log::info!("Slept {} ticks, {} seconds", counter, timer.sleep_duration(counter).as_secs_f32());
                         counter = 0;
 
                         // Process the moment.
