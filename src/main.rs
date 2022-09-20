@@ -11,22 +11,36 @@ use log::LevelFilter;
 use midi::MidiPlayer;
 use sampler::{Sampler, SamplerBank, SamplerSynth};
 use cpal::{traits::{HostTrait, DeviceTrait, StreamTrait}, Sample};
+use tracing_subscriber::FmtSubscriber;
 
 fn main() {
-    Builder::new()
-        .format(|buf, record| {
-            writeln!(
-                buf,
-                "{} {}: {}",
-                record.level(),
-                //Format like you want to: <-----------------
-                Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-                record.args()
-            )
-        })
-        .filter(None, LevelFilter::Info)
-        .init();
-    log::info!("Starting player...");
+    // For logging.
+    // Builder::new()
+    //     .format(|buf, record| {
+    //         writeln!(
+    //             buf,
+    //             "{} {}: {}",
+    //             record.level(),
+    //             //Format like you want to: <-----------------
+    //             Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+    //             record.args()
+    //         )
+    //     })
+    //     .filter(None, LevelFilter::Info)
+    //     .init();
+
+    // For tracing.
+    // a builder for `FmtSubscriber`.
+    let subscriber = FmtSubscriber::builder()
+        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+        // will be written to stdout.
+        .with_max_level(tracing::Level::WARN)
+        // completes the builder.
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("setting default subscriber failed.");
+
+    tracing::info!("Starting player...");
 
     // Default audio host.
     let host = cpal::default_host();
@@ -43,7 +57,7 @@ fn main() {
         .expect("no configs!")
         .with_max_sample_rate().config();
 
-    let mut test_bank = SamplerBank::from_json_file(Path::new("sampler_bank_melody.json")).unwrap();
+    let mut test_bank = SamplerBank::from_json_file(Path::new("sampler_bank.json")).unwrap();
     test_bank.load_samplers().unwrap();
     test_bank.resample(supported_config.sample_rate.0 as u16);
 
@@ -52,7 +66,7 @@ fn main() {
         SamplerSynth::new(test_bank, supported_config.sample_rate.0 as usize, supported_config.channels as usize);
 
     let mut midi_player = MidiPlayer::new(sampler_synth).expect("Couldn't create new midi player.");
-    midi_player.load_from_file(Path::new("ff9.mid"));
+    midi_player.load_from_file(Path::new("kingdom.mid"));
     midi_player.play();
 
     // build the stream

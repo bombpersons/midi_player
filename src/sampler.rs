@@ -1,6 +1,7 @@
 use std::collections::{HashSet, HashMap};
 use std::io::{Read, Seek};
 use std::mem::take;
+use std::process::Output;
 use std::sync::mpsc::{Receiver, channel, Sender};
 use std::thread::{JoinHandle, self};
 use std::time::{Instant, Duration};
@@ -58,7 +59,7 @@ struct WavData {
 
 impl WavData {
     pub fn from_file(filepath: &Path) -> Result<Self, WavDataError> {
-        log::info!("Loading {}", filepath.display());
+        tracing::info!("Loading {}", filepath.display());
 
         // Open the file...
         let mut file = File::open(filepath)?;
@@ -110,7 +111,7 @@ impl WavData {
     }
 
     pub fn resample(&self, new_sample_rate: u16) -> Result<Self, WavDataError> {
-        log::info!("Resampling from {} samples per second to {} samples per second...", self.sample_rate, new_sample_rate);
+        tracing::info!("Resampling from {} samples per second to {} samples per second...", self.sample_rate, new_sample_rate);
 
         // Create the resampler...
         // I have no idea what these options really do, just using the ones used on the readme.
@@ -151,7 +152,7 @@ impl WavData {
             sample_rate: new_sample_rate
         };
 
-        log::info!("Resampled.");
+        tracing::info!("Resampled.");
 
         Ok(new)
     }
@@ -344,11 +345,24 @@ impl Sampler {
     }
 
     // Retrieve the samples for a particular note. Returns the number of samples returned.
-    pub fn get_samples(&mut self, output_sample_rate: u16, midi_note: u8, progress: usize, output_channels: u8, output: &mut [f32]) -> Result<usize, SamplerError> {
-        // // TODO: support multiple different samples.
-        // if self.samples.len() != 1 {
-        //     return Err(SamplerError::MultipleSamplesNotSupported);
-        // }
+    pub fn get_samples(&mut self, output_sample_rate: u16, midi_note: u8, volume: f32, progress: usize, output_channels: u8, output: &mut [f32]) -> Result<usize, SamplerError> {
+        // Pick the sample with the closest midi note.
+        let mut closest_sample = None;
+        for sample in self.samples.iter() {
+            closest_sample = match closest_sample {
+                None => Some(sample),
+                Some(closest) => {
+                    if sample.midi_note.abs_diff(midi_note) < closest.midi_note.abs_diff(midi_note) {
+                        Some(sample)
+                    } else {
+                        Some(closest)
+                    }
+                }
+            }
+        }
+        if closest_sample.is_none() {
+            return Err(SamplerError::NoSamplesFound);
+        }
 
         // TODO: Assuming f32 samples.
         let sample = self.samples.get(0).unwrap();
@@ -374,18 +388,13 @@ impl Sampler {
             // sample, then we need to sample at a different rate.
             let sample_index = ((progress + sampled) as f32  * freq_ratio) as usize;
 
-            // Not past the end of the sample?
-            if sample_index >= sample_length {
-                break;
-            }
-
             // Get the data from each channel.
             // If there are more channels in the sample than in the output,
             // the ignore some of the sample channels.
             // If there are less in the sample then duplicate them.
             for (output_channel, o) in frame.iter_mut().enumerate() {
                 let channel_to_sample = (sample_channels-1).min(output_channel);
-                *o = sample.get_sample(sample_index, channel_to_sample)?;
+                *o += sample.get_sample(sample_index, channel_to_sample)? * volume;
             }
             sampled += 1;
         }
@@ -604,6 +613,114 @@ impl SamplerSynth {
         (synth, output)
     }
 
+    fn get_samples(sampler_bank: &mut SamplerBank, 
+                   sample_rate: usize,
+                   channel_to_voice_index: &Vec<usize>,
+                   tracks: &mut Tracks, channel_count: usize, 
+                   samples_required: usize, 
+                   producer: &mut ringbuf::Producer<f32>) -> usize {
+        let instant = Instant::now();
+
+        let span = tracing::span!(tracing::Level::INFO, "SamplerSynthOutput::get_samples", samples_required);
+        let _entered = span.enter();
+
+        // Generate all the samples we need.
+        let remaining_buffer_space = producer.remaining();
+
+        // Divide by channel count, then multiply it to make sure that the remaining space we use is a multiple of the channel count.
+        let mut total_samples_to_produce = ((remaining_buffer_space / channel_count) * channel_count).min(samples_required * channel_count);
+
+        let mut first_loop = true;
+        let mut notes_sampled = 0;
+
+        // TODO: Doing this in chunks is a lot faster, but...
+        // for whatever reason the samples come out sounding much lower in pitch.
+        // figure out why this is happening.
+        const GET_SAMPLES_IN_CHUNKS: bool = true;
+        if GET_SAMPLES_IN_CHUNKS {
+            // For each output channel.
+            const CHUNK_SIZE: usize = 2;
+            let mut output: [f32; CHUNK_SIZE];
+
+            // Do this in chunks of samples so that we can use statically allocated memory.
+            for chunk_start in (0..total_samples_to_produce).step_by(CHUNK_SIZE) {
+                // Clear out the output buffer
+                output = [0.0; CHUNK_SIZE];
+
+                // If we are on the last chunk it's likely there'll be less samples to make than a whole chunk's worth.
+                let samples_in_chunk = (total_samples_to_produce - chunk_start).min(CHUNK_SIZE);
+
+                //tracing::info!("Samples in chunk: {}", samples_in_chunk);
+
+                // Go through each note and accumulate the sample value by mixing all the notes samples together.
+                tracks.for_each_note(&mut |midi_note, note, channel| {
+                    let voice_index = (channel.as_int() as usize).min(sampler_bank.voices.len()-1);
+                    let sampler = &mut sampler_bank.samplers[channel_to_voice_index[voice_index]];
+        
+                    let sampler_result = sampler.get_samples(
+                        sample_rate as u16, 
+                        midi_note.as_int(), 
+                        (note.velocity as f32) / 127.0,
+                        note.samples_played, 
+                        channel_count as u8, 
+                        &mut output[..samples_in_chunk]);
+                    let progress = sampler_result.unwrap();
+                    note.samples_played += progress;
+
+                    if first_loop {
+                        notes_sampled += 1;
+                    }
+                });
+
+                first_loop = false;
+
+                // Push these onto our producer.
+                producer.push_slice(&output[..samples_in_chunk]);
+            }
+        } else {
+            for sample_count in 0..total_samples_to_produce/channel_count {
+                // If the buffer is full we need to wait.
+                if producer.remaining() < channel_count {
+                    tracing::info!("Buffer full!");
+                    break;
+                }
+
+                for output_channel in 0..channel_count {
+                    let mut sample = 0.0;
+                    tracks.for_each_note(&mut |midi_note, note, channel| {
+                        let voice_index = (channel.as_int() as usize).min(sampler_bank.voices.len()-1);
+                        let default_sampler = &sampler_bank.samplers[channel_to_voice_index[voice_index]];
+                        
+                        let note_sample = default_sampler.get_sample(
+                            sample_rate as u16, midi_note.as_int(), note.samples_played, output_channel as u8)
+                                .unwrap_or(0.0);
+
+                        let attenuated = note_sample * (note.velocity as f32 / 127.0);
+                        sample += attenuated;
+                        
+                        // Increment the amount of samples the note has played.
+                        note.samples_played += 1;
+
+                        // Keep track of how many notes we sampled for logging purposes.
+                        if first_loop {
+                            notes_sampled += 1;
+                        }
+                    });
+
+                    first_loop = false;
+
+                    producer.push(sample);
+                }
+            }
+        }
+
+        let individual_samples_produced = (total_samples_to_produce * notes_sampled) as f32 / sample_rate as f32;
+        let time_per_second_of_samples = if individual_samples_produced > 0.0 { instant.elapsed().as_secs_f32() / individual_samples_produced } else { 0.0 };
+        tracing::event!(tracing::Level::INFO, time_per_second_of_samples = time_per_second_of_samples);
+
+        total_samples_to_produce / channel_count
+    }
+
     fn create_synth_thread(mut sampler_bank: SamplerBank, sample_rate: usize, channel_count: usize, receiver: Receiver<MidiEvent>, mut producer: ringbuf::Producer<f32>) -> JoinHandle<()> {
         let thread = thread::spawn(move || {
             // A list of tracks that contain a list of notes that are currently playing.
@@ -633,57 +750,35 @@ impl SamplerSynth {
                 }
             };
 
+            let channel_to_voice_index: Vec<usize> = sampler_bank.voices.iter().map(|voice_name| {
+                for (index, sampler) in sampler_bank.samplers.iter().enumerate() {
+                    if sampler.name.as_str() == voice_name {
+                        return index;
+                    }
+                }
+                0
+            }).collect();
+
             loop { 
                 // Get the next midi event.
                 let received = receiver.recv_timeout(Duration::from_secs_f32(SAMPLER_SYNTH_BUFFER_LENGTH / 8.0));
 
-                //thread::sleep(Duration::from_secs_f32(sample_duration * 100.0));
+                // Before actually processing the event, make the samples for the time up until now.
+                // We can safely do this because no midi events have been received since the last time we processed an event.
                 let samples_needed = (time.elapsed().as_secs_f32() * sample_rate as f32).floor() as usize;
                 let mut samples_to_produce = samples_needed - samples_processed;
                 if samples_to_produce == 0 {
                     continue;
                 }
 
-                // Generate all the samples we need.
-                let mut samples_produced = 0;
-                samples_to_produce = (producer.remaining() / channel_count).min(samples_to_produce);
-
-                for sample_count in 0..samples_to_produce {
-                    // If the buffer is full we need to wait.
-                    if producer.remaining() < channel_count {
-                        log::info!("Buffer full!");
-                        break;
-                    }
-
-                    // For each output channel.
-                    for output_channel in 0..channel_count {
-                        let mut sample = 0.0;
-                        tracks.for_each_note(&mut |midi_note, note, channel| {
-                            let voice_index = (channel.as_int() as usize).min(sampler_bank.voices.len()-1);
-                            let voice_name = sampler_bank.voices[voice_index].as_str();
-                            let default_sampler = sampler_bank.samplers.iter().find(|&n| n.name == voice_name).unwrap();
-
-                            let note_sample = default_sampler.get_sample(
-                                sample_rate as u16, midi_note.as_int(), note.samples_played, output_channel as u8)
-                                    .unwrap_or(0.0);
-
-                            let attenuated = note_sample * (note.velocity as f32 / 127.0);
-                            sample += attenuated;
-                            
-                            // Increment the amount of samples the note has played.
-                            note.samples_played += 1;
-                        });
-
-                        producer.push(sample);
-                    }
-
-                    samples_produced += 1;
-                }
-
-                // Reset the time.
-                samples_processed += samples_produced;
-
-                log::info!("Produced {} samples, buffer has {} samples remaining.", samples_produced, producer.remaining());
+                samples_processed += Self::get_samples(
+                    &mut sampler_bank, 
+                    sample_rate, 
+                    &channel_to_voice_index, 
+                    &mut tracks, channel_count, 
+                    samples_to_produce, 
+                    &mut producer
+                );
 
                 // Now process all of the samples up to the point just before the event received above.
                 match received {
