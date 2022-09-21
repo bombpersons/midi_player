@@ -240,6 +240,47 @@ impl Sample {
             None => Err(SampleError::SampleOutOfBounds)
         }
     }
+
+    pub fn get_samples(&self, progress: usize, desired_midi_note: u8, volume: f32, output_channels: usize, output: &mut [f32]) -> Result<usize, SampleError> {
+        // How much faster do we need to sample in order
+        // to get the desired frequency?
+        let desired_freq = midi::midi_note_to_freq(desired_midi_note);
+        let sample_freq = midi::midi_note_to_freq(self.midi_note);
+        let freq_ratio = desired_freq / sample_freq;
+
+        // So we don't go over the end.
+        let sample_length = self.get_sample_length()?;
+
+        // Where to start sampling from. 
+        let mut progress = progress as f32 * freq_ratio;
+
+        // Calculate the number of samples we should take.
+        let samples_remaining = ((sample_length as f32 - progress) / freq_ratio) as usize;
+        let samples_to_end_at = (output.len()/output_channels).min(samples_remaining);
+
+        // How many channels are in this sample.
+        let sample_channels = self.get_sample_channel_count()?;
+
+        // Iterate over the samples at a rate determined by freq_ratio.
+        let mut sampled = 0;
+        while sampled < samples_to_end_at {
+            let index_to_sample = progress as usize;
+
+            // Fill out each channel.
+            for channel in 0..output_channels {
+                let channel_to_sample = (sample_channels-1).min(channel);
+                output[sampled*output_channels + channel] += self.get_sample(index_to_sample, channel_to_sample)? * volume;
+            }
+
+            // Increment the count of how many samples we took.
+            sampled += 1;
+
+            // Increment the actual index to sample from to get the desired frequency.
+            progress += freq_ratio;
+        }
+
+        Ok(sampled)
+    }
 }
 
 #[derive(Debug)]
@@ -345,7 +386,7 @@ impl Sampler {
     }
 
     // Retrieve the samples for a particular note. Returns the number of samples returned.
-    pub fn get_samples(&mut self, output_sample_rate: u16, midi_note: u8, volume: f32, progress: usize, output_channels: u8, output: &mut [f32]) -> Result<usize, SamplerError> {
+    pub fn get_samples(&mut self, output_sample_rate: u16, midi_note: u8, volume: f32, progress: usize, output_channels: usize, output: &mut [f32]) -> Result<usize, SamplerError> {
         // Pick the sample with the closest midi note.
         let mut closest_sample = None;
         for sample in self.samples.iter() {
@@ -364,41 +405,15 @@ impl Sampler {
             return Err(SamplerError::NoSamplesFound);
         }
 
-        // TODO: Assuming f32 samples.
-        let sample = self.samples.get(0).unwrap();
-        let sample_channels = sample.get_sample_channel_count()?;
+        let sample = closest_sample.unwrap();
         let sample_rate = sample.get_sample_rate()?;
-        let sample_length = sample.get_sample_length()?;
 
         if output_sample_rate != sample_rate {
             log::info!("Sample rate of output doesn't match the input! Re-sample to match before playing.");
             return Err(SamplerError::MismatchedSampleRates);
         }
 
-        // How much faster do we need to sample in order
-        // to get the desired frequency?
-        let desired_freq = midi::midi_note_to_freq(midi_note);
-        let sample_freq = midi::midi_note_to_freq(sample.midi_note);
-        let freq_ratio = desired_freq / sample_freq;
-
-        let mut sampled = 0;
-        for frame in output.chunks_exact_mut(output_channels as usize) {
-            // Where do we sample from...
-            // If the desired frequency isn't the same as the natural frequency of the
-            // sample, then we need to sample at a different rate.
-            let sample_index = ((progress + sampled) as f32  * freq_ratio) as usize;
-
-            // Get the data from each channel.
-            // If there are more channels in the sample than in the output,
-            // the ignore some of the sample channels.
-            // If there are less in the sample then duplicate them.
-            for (output_channel, o) in frame.iter_mut().enumerate() {
-                let channel_to_sample = (sample_channels-1).min(output_channel);
-                *o += sample.get_sample(sample_index, channel_to_sample)? * volume;
-            }
-            sampled += 1;
-        }
-
+        let sampled = sample.get_samples(progress, midi_note, volume, output_channels, output)?;
         Ok(sampled)
     }
 }
@@ -639,7 +654,7 @@ impl SamplerSynth {
         const GET_SAMPLES_IN_CHUNKS: bool = true;
         if GET_SAMPLES_IN_CHUNKS {
             // For each output channel.
-            const CHUNK_SIZE: usize = 2;
+            const CHUNK_SIZE: usize = 4096;
             let mut output: [f32; CHUNK_SIZE];
 
             // Do this in chunks of samples so that we can use statically allocated memory.
@@ -662,7 +677,7 @@ impl SamplerSynth {
                         midi_note.as_int(), 
                         (note.velocity as f32) / 127.0,
                         note.samples_played, 
-                        channel_count as u8, 
+                        channel_count, 
                         &mut output[..samples_in_chunk]);
                     let progress = sampler_result.unwrap();
                     note.samples_played += progress;

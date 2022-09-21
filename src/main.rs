@@ -66,7 +66,7 @@ fn main() {
         SamplerSynth::new(test_bank, supported_config.sample_rate.0 as usize, supported_config.channels as usize);
 
     let mut midi_player = MidiPlayer::new(sampler_synth).expect("Couldn't create new midi player.");
-    midi_player.load_from_file(Path::new("kingdom.mid"));
+    midi_player.load_from_file(Path::new("hokuto.mid"));
     midi_player.play();
 
     // build the stream
