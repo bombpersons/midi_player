@@ -1,4 +1,4 @@
-use std::{path::Path, path::PathBuf, fs::{File}, io::Read, thread::{self, JoinHandle}, sync::Arc, collections::HashMap, num::ParseIntError};
+use std::{path::Path, path::PathBuf, fs::{File}, io::Read, thread::{self, JoinHandle}, sync::Arc, collections::HashMap, num::ParseIntError, time::Duration};
 use std::{io};
 use std::sync::mpsc::{Receiver, channel, Sender};
 
@@ -111,7 +111,7 @@ impl MidiPlayer {
     }
 
     fn actual_load_from_file(filepath: &Path, timer: &mut Ticker, sheet: &mut Option<Sheet>) -> Result<(), MidiPlayerError> {
-        log::info!("Loading new midi file from filepath {}", filepath.display());
+        tracing::info!("Loading new midi file from filepath {}", filepath.display());
 
         let mut file = File::open(filepath)?;
         let mut midi_bytes = Vec::new();
@@ -164,24 +164,51 @@ impl MidiPlayer {
                 for event in receiver.try_iter() {
                     let command_result = match event {
                         Command::NewFromFile(filepath) => { 
+                            paused = true;
+                            connection.all_notes_off();
+                            moment_index = 0;
+
                             Self::actual_load_from_file(&filepath, &mut timer, &mut sheet)
                         },
                         Command::NewFromBuf(buf) => {
+                            paused = true;
+                            connection.all_notes_off();
+                            moment_index = 0;
+                            
                             Self::actual_load_from_buf(&buf, &mut timer, &mut sheet)
                         },
-                        Command::Pause => Ok(()),
-                        Command::Stop => Ok(()),
-                        Command::Play => {
-                            // If there is a sheet (a song), then set the moment to the beginning.
+                        Command::Pause => {
+                            tracing::info!("Pausing...");
+                            
+                            paused = true;
+                            connection.all_notes_off();
+                            Ok(())
+                        },
+                        Command::Stop => {
+                            tracing::info!("Stopping...");
+
+                            // Pause, but go back to the beginning.
+                            paused = true;
+                            connection.all_notes_off();
                             moment_index = 0;
+                            Ok(())
+                        },
+                        Command::Play => {
+                            tracing::info!("Playing...");
+
                             paused = false; // Unpause if it we were paused.
                             Ok(())
                         }
                     };
-                    command_result.unwrap();
+                    
+                    match command_result {
+                        Ok(_) => tracing::info!("Command executed successfully."), 
+                        Err(e) => tracing::warn!("MidiPlayer encountered an error processing command: {:?}", e)
+                    }
                 }
 
                 if paused {
+                    thread::sleep(Duration::from_millis(1000));
                     continue;
                 }
 

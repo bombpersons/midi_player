@@ -468,6 +468,10 @@ impl SamplerBank {
         let paths = fs::read_dir(&parsed.folder)?;
         for sampler_dir_result in paths {
             let sampler_dir = sampler_dir_result?;
+            if sampler_dir.metadata().unwrap().is_file() {
+                continue;
+            }
+
             let mut sampler = Sampler {
                 name: sampler_dir.path().file_stem().unwrap().to_str().unwrap().to_string(),
                 samples: Vec::new()
@@ -572,7 +576,7 @@ impl Tracks {
     }
 
     pub fn note_on(&mut self, key: u7, vel: u7, channel: u4) {
-        //log::info!("Adding {} to channel {}...", key, channel);
+        log::debug!("Adding {} to channel {}...", key, channel);
 
         // Create a new note and add it to the appropriate track.
         let note = Note {
@@ -586,7 +590,7 @@ impl Tracks {
     }
 
     pub fn note_off(&mut self, key: u7, channel: u4) {
-        //log::info!("Removing {} from channel {}...", key, channel);
+        log::debug!("Removing {} from channel {}...", key, channel);
 
         // Find the note and remove it.
         self.tracks.get_mut(&channel)
@@ -636,14 +640,15 @@ impl SamplerSynth {
                    producer: &mut ringbuf::Producer<f32>) -> usize {
         let instant = Instant::now();
 
-        let span = tracing::span!(tracing::Level::INFO, "SamplerSynthOutput::get_samples", samples_required);
+        let span = tracing::span!(tracing::Level::DEBUG, "SamplerSynthOutput::get_samples", samples_required);
         let _entered = span.enter();
 
         // Generate all the samples we need.
-        let remaining_buffer_space = producer.remaining();
-
         // Divide by channel count, then multiply it to make sure that the remaining space we use is a multiple of the channel count.
-        let mut total_samples_to_produce = ((remaining_buffer_space / channel_count) * channel_count).min(samples_required * channel_count);
+        let remaining_buffer_space = (producer.remaining() / channel_count) * channel_count;
+
+        // Don't use more space than is available in the buffer.
+        let total_samples_to_produce = remaining_buffer_space.min(samples_required * channel_count);
 
         let mut first_loop = true;
         let mut notes_sampled = 0;
@@ -712,7 +717,7 @@ impl SamplerSynth {
 
                         let attenuated = note_sample * (note.velocity as f32 / 127.0);
                         sample += attenuated;
-                        
+
                         // Increment the amount of samples the note has played.
                         note.samples_played += 1;
 
@@ -731,7 +736,7 @@ impl SamplerSynth {
 
         let individual_samples_produced = (total_samples_to_produce * notes_sampled) as f32 / sample_rate as f32;
         let time_per_second_of_samples = if individual_samples_produced > 0.0 { instant.elapsed().as_secs_f32() / individual_samples_produced } else { 0.0 };
-        tracing::event!(tracing::Level::INFO, time_per_second_of_samples = time_per_second_of_samples);
+        tracing::event!(tracing::Level::DEBUG, time_per_second_of_samples = time_per_second_of_samples);
 
         total_samples_to_produce / channel_count
     }
@@ -742,8 +747,7 @@ impl SamplerSynth {
             let mut tracks = Tracks::new();
 
             // A timer so we know how many samples to produce.
-            let mut samples_processed = 0;
-            let mut time = Instant::now();
+            let mut time_behind = 0.0;
             let sample_duration = 1.0 / sample_rate as f32;
 
             let mut handle_event = |tracks: &mut Tracks, event: MidiEvent| {
@@ -774,19 +778,18 @@ impl SamplerSynth {
                 0
             }).collect();
 
-            loop { 
+            loop {
+                let timer = Instant::now();
+
                 // Get the next midi event.
                 let received = receiver.recv_timeout(Duration::from_secs_f32(SAMPLER_SYNTH_BUFFER_LENGTH / 8.0));
 
                 // Before actually processing the event, make the samples for the time up until now.
                 // We can safely do this because no midi events have been received since the last time we processed an event.
-                let samples_needed = (time.elapsed().as_secs_f32() * sample_rate as f32).floor() as usize;
-                let mut samples_to_produce = samples_needed - samples_processed;
-                if samples_to_produce == 0 {
-                    continue;
-                }
+                let samples_needed = ((timer.elapsed().as_secs_f32() + time_behind) * sample_rate as f32).floor() as usize;
+                let samples_to_produce = samples_needed;
 
-                samples_processed += Self::get_samples(
+                let samples_processed = Self::get_samples(
                     &mut sampler_bank, 
                     sample_rate, 
                     &channel_to_voice_index, 
@@ -798,7 +801,7 @@ impl SamplerSynth {
                 // Now process all of the samples up to the point just before the event received above.
                 match received {
                     Err(RecvTimeoutError) => (), // Ok, we expect this.
-                    Err(e) => println!("error: {}", e),
+                    Err(e) => tracing::warn!("Error occurred recieving midi event: {}", e),
                     Ok(event) => {
                         // Handle the event we just got and any others that we got at the same time.
                         handle_event(&mut tracks, event);
@@ -807,6 +810,22 @@ impl SamplerSynth {
                         }
                     }
                 }
+
+                // Reset the timer.
+                
+                // How much time of samples did we process?
+                let time_processed = samples_processed as f32 * sample_duration;
+
+                // How much time did we take to do that?
+                let mut time_taken = timer.elapsed().as_secs_f32();
+                
+                // Subtract the time that we processed from the time taken, then keep a record of the remaining time
+                // so that we can make up for it next loop.
+                time_taken -= time_processed;
+                time_behind = time_taken;
+                //time_behind = 0;
+
+                tracing::debug!("Time behind: {}", time_behind);
             }
         });
 

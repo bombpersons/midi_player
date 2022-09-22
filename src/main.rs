@@ -3,7 +3,7 @@ mod sampler;
 
 use std::thread;
 use std::{path::Path, time::Duration, sync::Arc};
-use std::io::Write;
+use std::io::{Write, Read};
 
 use chrono::Local;
 use env_logger::Builder;
@@ -34,7 +34,7 @@ fn main() {
     let subscriber = FmtSubscriber::builder()
         // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
         // will be written to stdout.
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(tracing::Level::TRACE)
         // completes the builder.
         .finish();
     tracing::subscriber::set_global_default(subscriber)
@@ -57,7 +57,7 @@ fn main() {
         .expect("no configs!")
         .with_max_sample_rate().config();
 
-    let mut test_bank = SamplerBank::from_json_file(Path::new("sampler_bank.json")).unwrap();
+    let mut test_bank = SamplerBank::from_json_file(Path::new("test_samples/sampler_bank_push.json")).unwrap();
     test_bank.load_samplers().unwrap();
     test_bank.resample(supported_config.sample_rate.0 as u16);
 
@@ -66,7 +66,7 @@ fn main() {
         SamplerSynth::new(test_bank, supported_config.sample_rate.0 as usize, supported_config.channels as usize);
 
     let mut midi_player = MidiPlayer::new(sampler_synth).expect("Couldn't create new midi player.");
-    midi_player.load_from_file(Path::new("hokuto.mid"));
+    midi_player.load_from_file(Path::new("test_mid/push.mid"));
     midi_player.play();
 
     // build the stream
@@ -87,6 +87,30 @@ fn main() {
     stream.play().unwrap();
 
     loop {
-        thread::sleep(Duration::from_secs(1));
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)
+            .expect("Error getting command.");
+
+        let args: Vec<&str> = line.trim().split(' ').collect();
+        if args.len() > 0 {
+            let command = args[0];
+
+            tracing::info!("Command: {}", command);
+
+            match command {
+                "stop" => midi_player.stop(),
+                "play" => midi_player.play(),
+                "pause" => midi_player.pause(),
+                "load" => {
+                    if args.len() >= 2 {
+                        midi_player.load_from_file(Path::new(args[1]))
+                    } else {
+                        tracing::info!("No midi file specified to load.")
+                    }
+                },
+                "exit" => break,
+                _ => tracing::info!("Invalid command '{}'", command)
+            }
+        }
     }
 }
