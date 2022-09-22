@@ -653,85 +653,44 @@ impl SamplerSynth {
         let mut first_loop = true;
         let mut notes_sampled = 0;
 
-        // TODO: Doing this in chunks is a lot faster, but...
-        // for whatever reason the samples come out sounding much lower in pitch.
-        // figure out why this is happening.
-        const GET_SAMPLES_IN_CHUNKS: bool = true;
-        if GET_SAMPLES_IN_CHUNKS {
-            // For each output channel.
-            const CHUNK_SIZE: usize = 4096;
-            let mut output: [f32; CHUNK_SIZE];
+        // For each output channel.
+        const CHUNK_SIZE: usize = 4096;
+        let mut output: [f32; CHUNK_SIZE];
 
-            // Do this in chunks of samples so that we can use statically allocated memory.
-            for chunk_start in (0..total_samples_to_produce).step_by(CHUNK_SIZE) {
-                // Clear out the output buffer
-                output = [0.0; CHUNK_SIZE];
+        // Do this in chunks of samples so that we can use statically allocated memory.
+        for chunk_start in (0..total_samples_to_produce).step_by(CHUNK_SIZE) {
+            // Clear out the output buffer
+            output = [0.0; CHUNK_SIZE];
 
-                // If we are on the last chunk it's likely there'll be less samples to make than a whole chunk's worth.
-                let samples_in_chunk = (total_samples_to_produce - chunk_start).min(CHUNK_SIZE);
+            // If we are on the last chunk it's likely there'll be less samples to make than a whole chunk's worth.
+            let samples_in_chunk = (total_samples_to_produce - chunk_start).min(CHUNK_SIZE);
 
-                //tracing::info!("Samples in chunk: {}", samples_in_chunk);
+            //tracing::info!("Samples in chunk: {}", samples_in_chunk);
 
-                // Go through each note and accumulate the sample value by mixing all the notes samples together.
-                tracks.for_each_note(&mut |midi_note, note, channel| {
-                    let voice_index = (channel.as_int() as usize).min(sampler_bank.voices.len()-1);
-                    let sampler = &mut sampler_bank.samplers[channel_to_voice_index[voice_index]];
-        
-                    let sampler_result = sampler.get_samples(
-                        sample_rate as u16, 
-                        midi_note.as_int(), 
-                        (note.velocity as f32) / 127.0,
-                        note.samples_played, 
-                        channel_count, 
-                        &mut output[..samples_in_chunk]);
-                    let progress = sampler_result.unwrap();
-                    note.samples_played += progress;
+            // Go through each note and accumulate the sample value by mixing all the notes samples together.
+            tracks.for_each_note(&mut |midi_note, note, channel| {
+                let voice_index = (channel.as_int() as usize).min(sampler_bank.voices.len()-1);
+                let sampler = &mut sampler_bank.samplers[channel_to_voice_index[voice_index]];
+    
+                let sampler_result = sampler.get_samples(
+                    sample_rate as u16, 
+                    midi_note.as_int(), 
+                    (note.velocity as f32) / 127.0,
+                    note.samples_played, 
+                    channel_count, 
+                    &mut output[..samples_in_chunk]);
+                let progress = sampler_result.unwrap();
+                note.samples_played += progress;
 
-                    if first_loop {
-                        notes_sampled += 1;
-                    }
-                });
-
-                first_loop = false;
-
-                // Push these onto our producer.
-                producer.push_slice(&output[..samples_in_chunk]);
-            }
-        } else {
-            for sample_count in 0..total_samples_to_produce/channel_count {
-                // If the buffer is full we need to wait.
-                if producer.remaining() < channel_count {
-                    tracing::info!("Buffer full!");
-                    break;
+                if first_loop {
+                    notes_sampled += 1;
                 }
+            });
 
-                for output_channel in 0..channel_count {
-                    let mut sample = 0.0;
-                    tracks.for_each_note(&mut |midi_note, note, channel| {
-                        let voice_index = (channel.as_int() as usize).min(sampler_bank.voices.len()-1);
-                        let default_sampler = &sampler_bank.samplers[channel_to_voice_index[voice_index]];
-                        
-                        let note_sample = default_sampler.get_sample(
-                            sample_rate as u16, midi_note.as_int(), note.samples_played, output_channel as u8)
-                                .unwrap_or(0.0);
+            first_loop = false;
 
-                        let attenuated = note_sample * (note.velocity as f32 / 127.0);
-                        sample += attenuated;
-
-                        // Increment the amount of samples the note has played.
-                        note.samples_played += 1;
-
-                        // Keep track of how many notes we sampled for logging purposes.
-                        if first_loop {
-                            notes_sampled += 1;
-                        }
-                    });
-
-                    first_loop = false;
-
-                    producer.push(sample);
-                }
-            }
+            // Push these onto our producer.
+            producer.push_slice(&output[..samples_in_chunk]);
         }
 
         let individual_samples_produced = (total_samples_to_produce * notes_sampled) as f32 / sample_rate as f32;
