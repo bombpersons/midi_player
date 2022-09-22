@@ -1,34 +1,13 @@
-mod midi;
-mod sampler;
-
 use std::thread;
 use std::{path::Path, time::Duration, sync::Arc};
 use std::io::{Write, Read};
 
-use chrono::Local;
-use env_logger::Builder;
-use log::LevelFilter;
-use midi::MidiPlayer;
-use sampler::{Sampler, SamplerBank, SamplerSynth};
+use rusty_sample_player::midi::MidiPlayer;
+use rusty_sample_player::sampler::{Sampler, SamplerBank, SamplerSynth};
 use cpal::{traits::{HostTrait, DeviceTrait, StreamTrait}, Sample};
 use tracing_subscriber::FmtSubscriber;
 
 fn main() {
-    // For logging.
-    // Builder::new()
-    //     .format(|buf, record| {
-    //         writeln!(
-    //             buf,
-    //             "{} {}: {}",
-    //             record.level(),
-    //             //Format like you want to: <-----------------
-    //             Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-    //             record.args()
-    //         )
-    //     })
-    //     .filter(None, LevelFilter::Info)
-    //     .init();
-
     // For tracing.
     // a builder for `FmtSubscriber`.
     let subscriber = FmtSubscriber::builder()
@@ -81,7 +60,7 @@ fn main() {
             }
         },
         move |err| {
-            log::info!("error! {}", err);
+            tracing::warn!("error! {}", err);
         }
     ).unwrap();
     stream.play().unwrap();

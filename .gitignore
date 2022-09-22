@@ -1,3 +1,4 @@
 /target
-/test_mid
-/test_samples
+/example_player/target
+/example_player/test_mid
+/example_player/test_samples

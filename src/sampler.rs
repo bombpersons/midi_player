@@ -27,7 +27,7 @@ struct Channel {
 }
 
 #[derive(Debug)]
-enum WavDataError {
+pub enum WavDataError {
     IoError(io::Error),
     ResamplerConstructionError(ResamplerConstructionError),
     ResampleError(ResampleError)

@@ -1,0 +1,15 @@
+[package]
+name = "rusty_example_sample_player"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[profile.release]
+debug = 1
+
+[dependencies]
+cpal = "0.14.0"
+tracing = "0.1.36"
+tracing-subscriber = "0.3.15"
+rusty_sample_player = { path = "../" }
