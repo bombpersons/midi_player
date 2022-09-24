@@ -231,6 +231,30 @@ impl Sample {
         Ok(self.data.as_ref().unwrap().channels.len())
     }
 
+    pub fn get_sample_interpolated(&self, index: f32, channel: usize) -> Result<f32, SampleError> {
+        let sample_channels = self.get_sample_channel_count()?;
+        let channel = self.get_channel(channel)?;
+
+        let low_sample_index = index.floor() as usize;
+        let high_sample_index = index.ceil() as usize;
+
+        // If we have no low sample error
+        match channel.samples.get(low_sample_index) {
+            None => Err(SampleError::SampleOutOfBounds),
+            Some(low_sample) => {
+                // Try and get the high sample and interpolate. If it doesn't exist, just return then low one.
+                match channel.samples.get(high_sample_index) {
+                    _ => Ok(*low_sample),
+                    Some(high_sample) => {
+                        // Interpolate between both samples.
+                        let remainder = index - low_sample_index as f32;
+                        Ok(low_sample + remainder * (high_sample - low_sample))
+                    }
+                }
+            }
+        }
+    }
+
     pub fn get_sample(&self, index: usize, channel: usize) -> Result<f32, SampleError> {
         let sample_channels = self.get_sample_channel_count()?;
         let channel = self.get_channel(channel)?;
@@ -241,42 +265,65 @@ impl Sample {
         }
     }
 
-    pub fn get_samples(&self, progress: usize, desired_midi_note: u8, volume: f32, output_channels: usize, output: &mut [f32]) -> Result<usize, SampleError> {
+    pub fn get_samples(&self, progress: Duration, time_stopped: Option<Duration>, output_sample_rate: usize, desired_midi_note: u8, volume: f32, output_channels: usize, output: &mut [f32]) -> Result<usize, SampleError> {
+        // Ratio of output samples per actual samples.
+        let sample_rate = self.get_sample_rate()?;
+        let sample_duration = 1.0 / sample_rate as f32;
+        let output_sample_duration = Duration::from_secs_f32(1.0 / output_sample_rate as f32);
+        let output_sample_num = output.len() / output_channels;
+
+        // How many channels are in this sample.
+        let sample_channels = self.get_sample_channel_count()?;
+
         // How much faster do we need to sample in order
         // to get the desired frequency?
         let desired_freq = midi::midi_note_to_freq(desired_midi_note);
         let sample_freq = midi::midi_note_to_freq(self.midi_note);
         let freq_ratio = desired_freq / sample_freq;
 
-        // So we don't go over the end.
-        let sample_length = self.get_sample_length()?;
+        // When do we stop sampling?
+        let mut progress = progress;
+        let progess_end = progress + output_sample_duration.mul_f32(output_sample_num as f32);
 
-        // Where to start sampling from. 
-        let mut progress = progress as f32 * freq_ratio;
-
-        // Calculate the number of samples we should take.
-        let samples_remaining = ((sample_length as f32 - progress) / freq_ratio) as usize;
-        let samples_to_end_at = (output.len()/output_channels).min(samples_remaining);
-
-        // How many channels are in this sample.
-        let sample_channels = self.get_sample_channel_count()?;
-
-        // Iterate over the samples at a rate determined by freq_ratio.
         let mut sampled = 0;
-        while sampled < samples_to_end_at {
-            let index_to_sample = progress as usize;
+        while sampled < output_sample_num {
+            // Calculate the sample index we need to be getting right now.
+            let sample_index = progress.as_secs_f32() * sample_rate as f32 * freq_ratio;
 
             // Fill out each channel.
             for channel in 0..output_channels {
                 let channel_to_sample = (sample_channels-1).min(channel);
-                output[sampled*output_channels + channel] += self.get_sample(index_to_sample, channel_to_sample)? * volume;
+                let sample = match self.get_sample_interpolated(sample_index, channel_to_sample) {
+                    Err(SampleError::SampleOutOfBounds) => { // Sample out of bounds, return 0.0
+                        Ok(0.0)
+                    },
+                    Ok(mut sample) => {
+                        // Fade in the first moment of the sample to avoid clipping.
+                        const fade_in_duration: f32 = 0.01;
+                        let fade_in = (progress.as_secs_f32() / fade_in_duration).min(1.0);
+                        sample *= fade_in;
+
+                        // Fade out in the last moment of the sample to avoid clipping.
+                        const fade_out_duration: f32 = 0.1;
+                        if let Some(time_stopped) = time_stopped {
+                            let duration_since_stopped = (progress - time_stopped).max(Duration::ZERO);
+                            let fade_out = 1.0 - (duration_since_stopped.as_secs_f32() / fade_out_duration).min(1.0);
+
+                            sample *= fade_out;
+                        }
+
+                        // Volume
+                        sample *= volume;
+
+                        Ok(sample)
+                    },
+                    Err(e) => Err(e), // Return the error unmodified
+                }?;
+                output[sampled*output_channels + channel] += sample;
             }
 
-            // Increment the count of how many samples we took.
             sampled += 1;
-
-            // Increment the actual index to sample from to get the desired frequency.
-            progress += freq_ratio;
+            progress += output_sample_duration
         }
 
         Ok(sampled)
@@ -336,57 +383,8 @@ impl Sampler {
         Ok(())
     }
 
-    pub fn get_sample(&self, output_sample_rate: u16, midi_note: u8, progress: usize, channel: u8) -> Result<f32, SamplerError> {
-        // Pick the sample with the closest midi note.
-        let mut closest_sample = None;
-        for sample in self.samples.iter() {
-            closest_sample = match closest_sample {
-                None => Some(sample),
-                Some(closest) => {
-                    if sample.midi_note.abs_diff(midi_note) < closest.midi_note.abs_diff(midi_note) {
-                        Some(sample)
-                    } else {
-                        Some(closest)
-                    }
-                }
-            }
-        }
-        if closest_sample.is_none() {
-            return Err(SamplerError::NoSamplesFound);
-        }
-
-        let sample = closest_sample.unwrap();
-        let sample_channels = sample.get_sample_channel_count()?;
-        let sample_rate = sample.get_sample_rate()?;
-        let sample_length = sample.get_sample_length()?;
-
-        if output_sample_rate != sample_rate {
-            log::info!("Sample rate of output doesn't match the input! Re-sample to match before playing.");
-            return Err(SamplerError::MismatchedSampleRates);
-        }
-
-        // How much faster do we need to sample in order
-        // to get the desired frequency?
-        let desired_freq = midi::midi_note_to_freq(midi_note);
-        let sample_freq = midi::midi_note_to_freq(sample.midi_note);
-        let freq_ratio = desired_freq / sample_freq;
-
-        // Where do we sample from...
-        // If the desired frequency isn't the same as the natural frequency of the
-        // sample, then we need to sample at a different rate.
-        
-        // Ignore some of the channels if there are less in the output.
-        // Duplicate the sample channels if there are more in the output.
-        let channel_to_sample = (sample_channels-1).min(channel as usize);
-
-        let sample_index = (progress as f32  * freq_ratio) as usize;
-        let output = sample.get_sample(sample_index, channel_to_sample)?;
-
-        Ok(output)
-    }
-
     // Retrieve the samples for a particular note. Returns the number of samples returned.
-    pub fn get_samples(&mut self, output_sample_rate: u16, midi_note: u8, volume: f32, progress: usize, output_channels: usize, output: &mut [f32]) -> Result<usize, SamplerError> {
+    pub fn get_samples(&mut self, output_sample_rate: usize, midi_note: u8, volume: f32, progress: Duration, time_stopped: Option<Duration>, output_channels: usize, output: &mut [f32]) -> Result<usize, SamplerError> {
         // Pick the sample with the closest midi note.
         let mut closest_sample = None;
         for sample in self.samples.iter() {
@@ -406,14 +404,7 @@ impl Sampler {
         }
 
         let sample = closest_sample.unwrap();
-        let sample_rate = sample.get_sample_rate()?;
-
-        if output_sample_rate != sample_rate {
-            log::info!("Sample rate of output doesn't match the input! Re-sample to match before playing.");
-            return Err(SamplerError::MismatchedSampleRates);
-        }
-
-        let sampled = sample.get_samples(progress, midi_note, volume, output_channels, output)?;
+        let sampled = sample.get_samples(progress, time_stopped, output_sample_rate, midi_note, volume, output_channels, output)?;
         Ok(sampled)
     }
 }
@@ -561,17 +552,20 @@ impl SamplerSynthOutput {
 
 pub struct Note {
     velocity: u8, 
-    samples_played: usize
+    duration_played: Duration,
+    time_stopped: Option<Duration>
 }
 
 pub struct Tracks {
-    tracks: HashMap<u4, HashMap<u7, Note>>
+    tracks: HashMap<u4, HashMap<u7, Note>>,
+    notes_released: Vec<(u4, u7, Note)>
 }
 
 impl Tracks {
     pub fn new() -> Self {
         Self {
-            tracks: HashMap::new()
+            tracks: HashMap::new(),
+            notes_released: Vec::new()
         }
     }
 
@@ -581,7 +575,8 @@ impl Tracks {
         // Create a new note and add it to the appropriate track.
         let note = Note {
             velocity: vel.as_int(),
-            samples_played: 0
+            duration_played: Duration::ZERO,
+            time_stopped: None
         };
 
         // If the track doesn't exist add it.
@@ -592,9 +587,32 @@ impl Tracks {
     pub fn note_off(&mut self, key: u7, channel: u4) {
         log::debug!("Removing {} from channel {}...", key, channel);
 
-        // Find the note and remove it.
+        // Find the note. Mark the time it stopped being played and add it to our released
+        // notes list. This is so that the synth can continue to play these notes and fade them out.
+        // They'll be purged eventually later on.
         self.tracks.get_mut(&channel)
-            .map(|track| track.remove(&key));
+            .map(|track| {
+                match track.remove_entry(&key) {
+                    None => (),
+                    Some((key, note)) => {
+                        let mut note = note;
+                        note.time_stopped = Some(note.duration_played);
+                        self.notes_released.push((channel, key, note));
+                    }
+                }
+            });
+    }
+
+    pub fn purge_finished_notes(&mut self, threshold: Duration) {
+        self.notes_released.retain(|(channel, key, note)| {
+            match note.time_stopped {
+                None => true,
+                Some(time_stopped) => {
+                    let duration = note.duration_played - time_stopped;
+                    duration < threshold
+                }
+            }
+        });
     }
 
     pub fn for_each_note<F: FnMut(&u7, &mut Note, &u4)>(&mut self, func: &mut F) {
@@ -602,6 +620,10 @@ impl Tracks {
             for (midi_note, note) in track.iter_mut() {
                 func(midi_note, note, channel);
             }
+        }
+
+        for (channel, key, note) in self.notes_released.iter_mut() {
+            func(key, note, channel);
         }
     }
 }
@@ -633,7 +655,7 @@ impl SamplerSynth {
     }
 
     fn get_samples(sampler_bank: &mut SamplerBank, 
-                   sample_rate: usize,
+                   output_sample_rate: usize,
                    channel_to_voice_index: &Vec<usize>,
                    tracks: &mut Tracks, channel_count: usize, 
                    samples_required: usize, 
@@ -649,6 +671,9 @@ impl SamplerSynth {
 
         // Don't use more space than is available in the buffer.
         let total_samples_to_produce = remaining_buffer_space.min(samples_required * channel_count);
+
+        // Sample duration
+        let sample_duration = 1.0 / output_sample_rate as f32;
 
         let mut first_loop = true;
         let mut notes_sampled = 0;
@@ -673,14 +698,15 @@ impl SamplerSynth {
                 let sampler = &mut sampler_bank.samplers[channel_to_voice_index[voice_index]];
     
                 let sampler_result = sampler.get_samples(
-                    sample_rate as u16, 
+                    output_sample_rate, 
                     midi_note.as_int(), 
                     (note.velocity as f32) / 127.0,
-                    note.samples_played, 
+                    note.duration_played, 
+                    note.time_stopped,
                     channel_count, 
                     &mut output[..samples_in_chunk]);
                 let progress = sampler_result.unwrap();
-                note.samples_played += progress;
+                note.duration_played += Duration::from_secs_f32(progress as f32 * sample_duration);
 
                 if first_loop {
                     notes_sampled += 1;
@@ -693,9 +719,9 @@ impl SamplerSynth {
             producer.push_slice(&output[..samples_in_chunk]);
         }
 
-        let individual_samples_produced = (total_samples_to_produce * notes_sampled) as f32 / sample_rate as f32;
-        let time_per_second_of_samples = if individual_samples_produced > 0.0 { instant.elapsed().as_secs_f32() / individual_samples_produced } else { 0.0 };
-        tracing::event!(tracing::Level::DEBUG, time_per_second_of_samples = time_per_second_of_samples);
+        // let individual_samples_produced = (total_samples_to_produce * notes_sampled) as f32 / output_sample_rate as f32;
+        // let time_per_second_of_samples = if individual_samples_produced > 0.0 { instant.elapsed().as_secs_f32() / individual_samples_produced } else { 0.0 };
+        // tracing::event!(tracing::Level::DEBUG, time_per_second_of_samples = time_per_second_of_samples);
 
         total_samples_to_produce / channel_count
     }
@@ -757,6 +783,8 @@ impl SamplerSynth {
                     &mut producer
                 );
 
+                tracks.purge_finished_notes(Duration::from_secs_f32(2.0));
+
                 // Now process all of the samples up to the point just before the event received above.
                 match received {
                     Err(RecvTimeoutError) => (), // Ok, we expect this.
@@ -784,7 +812,7 @@ impl SamplerSynth {
                 time_behind = time_taken;
                 //time_behind = 0;
 
-                tracing::debug!("Time behind: {}", time_behind);
+                tracing::event!(tracing::Level::DEBUG, time_behind = time_behind, samples_processed = samples_processed, buff_remaining = producer.remaining());
             }
         });
 

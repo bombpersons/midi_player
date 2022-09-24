@@ -13,7 +13,7 @@ fn main() {
     let subscriber = FmtSubscriber::builder()
         // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
         // will be written to stdout.
-        .with_max_level(tracing::Level::TRACE)
+        .with_max_level(tracing::Level::DEBUG)
         // completes the builder.
         .finish();
     tracing::subscriber::set_global_default(subscriber)
@@ -36,16 +36,16 @@ fn main() {
         .expect("no configs!")
         .with_max_sample_rate().config();
 
-    let mut test_bank = SamplerBank::from_json_file(Path::new("test_samples/sampler_bank_push.json")).unwrap();
+    let mut test_bank = SamplerBank::from_json_file(Path::new("test_samples/sampler_bank_tod.json")).unwrap();
     test_bank.load_samplers().unwrap();
-    test_bank.resample(supported_config.sample_rate.0 as u16);
+    //test_bank.resample(supported_config.sample_rate.0 as u16);
 
     // load a test midi file.
     let (sampler_synth, mut sampler_synth_output) = 
         SamplerSynth::new(test_bank, supported_config.sample_rate.0 as usize, supported_config.channels as usize);
 
     let mut midi_player = MidiPlayer::new(sampler_synth).expect("Couldn't create new midi player.");
-    midi_player.load_from_file(Path::new("test_mid/push.mid"));
+    midi_player.load_from_file(Path::new("test_mid/tod.mid"));
     midi_player.play();
 
     // build the stream
