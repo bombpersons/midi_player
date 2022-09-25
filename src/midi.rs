@@ -63,6 +63,7 @@ pub enum Command {
     Pause,
     Stop,
     Play,
+    Loop,
     NewFromFile(PathBuf),
     NewFromBuf(Vec<u8>)
 }
@@ -198,6 +199,10 @@ impl MidiPlayer {
 
                             paused = false; // Unpause if it we were paused.
                             Ok(())
+                        },
+                        Command::Loop => {
+                            looping = true;
+                            Ok(())
                         }
                     };
                     
@@ -262,5 +267,9 @@ impl MidiPlayer {
 
     pub fn stop(&mut self) {
         self.com_sender.send(Command::Stop);
+    }
+
+    pub fn toggle_loop(&mut self) {
+        self.com_sender.send(Command::Loop);
     }
 }

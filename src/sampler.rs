@@ -508,18 +508,28 @@ impl SamplerBank {
 
 pub struct SamplerSynthOutput {
     channel_count: usize,
-    pub consumer: ringbuf::Consumer<f32>
+    initial_buffer_filled: bool,
+    consumer: ringbuf::Consumer<f32>
 }
 
 impl SamplerSynthOutput {
     pub fn new(channel_count: usize, consumer: ringbuf::Consumer<f32>) -> Self {
         Self {
             channel_count,
+            initial_buffer_filled: false,
             consumer
         }
     }
 
     pub fn get_samples(&mut self, output_channels: u8, output: &mut [f32]) -> usize {
+        // Wait until the buffer is filled before sending out any samples.
+        if !self.initial_buffer_filled {
+            if !self.consumer.is_full() {
+                return 0;
+            }
+            self.initial_buffer_filled = true;
+        }
+
         let mut sampled = 0;
         for frame in output.chunks_exact_mut(output_channels as usize) {
             // If the synth hasn't produced at least a single frame of audio, then early quit with no output.
@@ -570,7 +580,7 @@ impl Tracks {
     }
 
     pub fn note_on(&mut self, key: u7, vel: u7, channel: u4) {
-        log::debug!("Adding {} to channel {}...", key, channel);
+        tracing::debug!("Adding {} to channel {}...", key, channel);
 
         // Create a new note and add it to the appropriate track.
         let note = Note {
@@ -585,7 +595,7 @@ impl Tracks {
     }
 
     pub fn note_off(&mut self, key: u7, channel: u4) {
-        log::debug!("Removing {} from channel {}...", key, channel);
+        tracing::debug!("Removing {} from channel {}...", key, channel);
 
         // Find the note. Mark the time it stopped being played and add it to our released
         // notes list. This is so that the synth can continue to play these notes and fade them out.
@@ -763,25 +773,37 @@ impl SamplerSynth {
                 0
             }).collect();
 
-            loop {
-                let timer = Instant::now();
+            // Keep track of how many samples we have produced accurately so that we can keep the buffer full.
+            // Any kind of error here can mean that the buffers slowly gets emptied producing popping noises once it's empty. 
+            let mut timer = Instant::now();
+            let mut samples_produced: u128 = 0; // This takes 10^31 hours to overflow, shouldn't be a problem >.<
 
+            loop {
                 // Get the next midi event.
                 let received = receiver.recv_timeout(Duration::from_secs_f32(SAMPLER_SYNTH_BUFFER_LENGTH / 8.0));
+                //thread::sleep(Duration::from_millis(1));
+
+                // let buffer_fullness = ((producer.len() as f64 / producer.capacity() as f64) * 2.0) - 1.0;
+                // let sample_rate = (sample_rate as f64 - (sample_rate as f64 / 1.0) * buffer_fullness) as usize;
+
+                tracing::debug!("Time Behind: {}, Buffer: {}/{}, Sample Rate: {}", time_behind, producer.len(), producer.capacity(), sample_rate);
+                //tracing::event!(tracing::Level::DEBUG, time_behind = time_behind, samples_processed = samples_processed, buff_remaining = producer.remaining());
 
                 // Before actually processing the event, make the samples for the time up until now.
                 // We can safely do this because no midi events have been received since the last time we processed an event.
-                let samples_needed = ((timer.elapsed().as_secs_f32() + time_behind) * sample_rate as f32).floor() as usize;
-                let samples_to_produce = samples_needed;
+                let samples_needed = (timer.elapsed().as_millis() * sample_rate as u128) / 1000;
+                //let samples_needed = ((timer.elapsed().as_secs_f32() + time_behind) * sample_rate as f32).floor() as usize;
+                let samples_to_produce = samples_needed - samples_produced;
 
                 let samples_processed = Self::get_samples(
                     &mut sampler_bank, 
                     sample_rate, 
                     &channel_to_voice_index, 
                     &mut tracks, channel_count, 
-                    samples_to_produce, 
+                    samples_to_produce as usize, 
                     &mut producer
                 );
+                samples_produced += samples_processed as u128;
 
                 tracks.purge_finished_notes(Duration::from_secs_f32(2.0));
 
@@ -797,22 +819,6 @@ impl SamplerSynth {
                         }
                     }
                 }
-
-                // Reset the timer.
-                
-                // How much time of samples did we process?
-                let time_processed = samples_processed as f32 * sample_duration;
-
-                // How much time did we take to do that?
-                let mut time_taken = timer.elapsed().as_secs_f32();
-                
-                // Subtract the time that we processed from the time taken, then keep a record of the remaining time
-                // so that we can make up for it next loop.
-                time_taken -= time_processed;
-                time_behind = time_taken;
-                //time_behind = 0;
-
-                tracing::event!(tracing::Level::DEBUG, time_behind = time_behind, samples_processed = samples_processed, buff_remaining = producer.remaining());
             }
         });
 

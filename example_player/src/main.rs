@@ -36,17 +36,18 @@ fn main() {
         .expect("no configs!")
         .with_max_sample_rate().config();
 
-    let mut test_bank = SamplerBank::from_json_file(Path::new("test_samples/sampler_bank_tod.json")).unwrap();
+    let mut test_bank = SamplerBank::from_json_file(Path::new("test_samples/sampler_bank_melody.json")).unwrap();
     test_bank.load_samplers().unwrap();
-    //test_bank.resample(supported_config.sample_rate.0 as u16);
+    test_bank.resample(supported_config.sample_rate.0 as u16);
 
     // load a test midi file.
     let (sampler_synth, mut sampler_synth_output) = 
         SamplerSynth::new(test_bank, supported_config.sample_rate.0 as usize, supported_config.channels as usize);
 
     let mut midi_player = MidiPlayer::new(sampler_synth).expect("Couldn't create new midi player.");
-    midi_player.load_from_file(Path::new("test_mid/tod.mid"));
+    midi_player.load_from_file(Path::new("test_mid/ff9.mid"));
     midi_player.play();
+    midi_player.toggle_loop();
 
     // build the stream
     let stream = device.build_output_stream(
@@ -80,6 +81,7 @@ fn main() {
                 "stop" => midi_player.stop(),
                 "play" => midi_player.play(),
                 "pause" => midi_player.pause(),
+                "loop" => midi_player.toggle_loop(),
                 "load" => {
                     if args.len() >= 2 {
                         midi_player.load_from_file(Path::new(args[1]))
