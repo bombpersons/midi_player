@@ -11,7 +11,7 @@ debug = 1
 [dependencies]
 cpal = "0.14.0"
 wav = "1.0.0"
-nodi = "0.19.2"
+midly = "0.5.2"
 serde = { version = "1.0.144", features = ["derive"] }
 serde_json = "1.0.85"
 rubato = "0.12.0"
@@ -22,3 +22,4 @@ log = "0.4.17"
 env_logger = "0.9.0"
 tracing = "0.1.35"
 tracing-subscriber = "0.3.15"
+itertools = "0.10.5"

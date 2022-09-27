@@ -333,6 +333,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.10.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -524,15 +533,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "memoffset",
-]
-
-[[package]]
-name = "nodi"
-version = "0.19.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15cd4fb98cfff4df8678ea420956a86cfe3765b31ee07966dce80df8556d1673"
-dependencies = [
- "midly",
 ]
 
 [[package]]
@@ -845,8 +845,9 @@ dependencies = [
  "chrono",
  "cpal",
  "env_logger",
+ "itertools",
  "log",
- "nodi",
+ "midly",
  "ringbuf",
  "rubato",
  "serde",

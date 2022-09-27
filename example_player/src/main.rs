@@ -2,8 +2,9 @@ use std::thread;
 use std::{path::Path, time::Duration, sync::Arc};
 use std::io::{Write, Read};
 
-use rusty_sample_player::midi::MidiPlayer;
-use rusty_sample_player::sampler::{Sampler, SamplerBank, SamplerSynth};
+use rusty_sample_player::midi::{create_player, Frame};
+use rusty_sample_player::sampler::{SamplerSynth};
+
 use cpal::{traits::{HostTrait, DeviceTrait, StreamTrait}, Sample};
 use tracing_subscriber::FmtSubscriber;
 
@@ -36,28 +37,44 @@ fn main() {
         .expect("no configs!")
         .with_max_sample_rate().config();
 
-    let mut test_bank = SamplerBank::from_json_file(Path::new("test_samples/sampler_bank_melody.json")).unwrap();
-    test_bank.load_samplers().unwrap();
-    test_bank.resample(supported_config.sample_rate.0 as u16);
-
-    // load a test midi file.
-    let (sampler_synth, mut sampler_synth_output) = 
-        SamplerSynth::new(test_bank, supported_config.sample_rate.0 as usize, supported_config.channels as usize);
-
-    let mut midi_player = MidiPlayer::new(sampler_synth).expect("Couldn't create new midi player.");
-    midi_player.load_from_file(Path::new("test_mid/ff9.mid"));
-    midi_player.play();
-    midi_player.toggle_loop();
+    // Create the player.
+    let synth = SamplerSynth::new();
+    let (player_thread, mut player_controller, mut player_output)
+         = create_player(supported_config.sample_rate.0 as usize, supported_config.channels as usize, synth);
 
     // build the stream
     let stream = device.build_output_stream(
         &supported_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let channel_count = supported_config.channels;
+            let channel_count = supported_config.channels as usize;
 
-            let mut written = 0;
-            while written < data.len() {
-                written += sampler_synth_output.get_samples(channel_count as u8, &mut data[written..]);
+            for output_frame in data.chunks_exact_mut(channel_count) {
+                // Try to get a frame, if there is none show a warning that the samples are being
+                // generated too slowly.
+                let frame = player_output.get_next_frame();
+                while frame.is_none() {
+                    //tracing::warn!("Audio buffer is empty!");
+                    player_output.get_next_frame();
+                }
+
+                // Depending on mono or stereo write the samples to the audio device.
+                match frame {
+                    None => (),
+                    Some(Frame::Mono(sample)) => {
+                        for channel in 0..channel_count {
+                            output_frame[channel] = sample;
+                        }
+                    },
+                    Some(Frame::Stereo(left, right)) => {
+                        for channel in 0..channel_count {
+                            output_frame[channel] = match channel {
+                                0 => left,
+                                1 => right,
+                                _ => right // Duplicate for any more channels?
+                            }
+                        }
+                    }
+                }
             }
         },
         move |err| {
@@ -78,13 +95,13 @@ fn main() {
             tracing::info!("Command: {}", command);
 
             match command {
-                "stop" => midi_player.stop(),
-                "play" => midi_player.play(),
-                "pause" => midi_player.pause(),
-                "loop" => midi_player.toggle_loop(),
+                "stop" => player_controller.stop(),
+                "play" => player_controller.play(),
+                "pause" => player_controller.pause(),
+                "loop" => player_controller.toggle_loop(),
                 "load" => {
                     if args.len() >= 2 {
-                        midi_player.load_from_file(Path::new(args[1]))
+                        player_controller.load_from_file(Path::new(args[1]))
                     } else {
                         tracing::info!("No midi file specified to load.")
                     }
