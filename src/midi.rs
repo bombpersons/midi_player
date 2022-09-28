@@ -1,4 +1,4 @@
-use std::{path::Path, path::PathBuf, fs::{File, self}, io::Read, thread::{self, JoinHandle}, sync::{Arc, mpsc::{TryRecvError, RecvError}}, collections::HashMap, num::ParseIntError, time::Duration, rc::Rc};
+use std::{path::Path, path::PathBuf, fs::{File, self}, io::Read, thread::{self, JoinHandle}, sync::{Arc, mpsc::{TryRecvError, RecvError}}, collections::HashMap, num::ParseIntError, time::Duration, rc::Rc, ops::Add};
 use std::{io};
 use std::sync::mpsc::{Receiver, channel, Sender};
 
@@ -61,6 +61,7 @@ pub fn note_name_to_midi_note(name: &str) -> Result<u8, NoteNameToMidiError> {
 }
 
 // A single frame of audio. Either Mono or Stereo.
+#[derive(Clone, Copy, Debug)]
 pub enum Frame {
     Mono(f32),
     Stereo(f32, f32)
@@ -69,7 +70,7 @@ pub enum Frame {
 // A synthesizer that the midiplayer can use to generate samples.
 pub trait Synth {
     fn midi_message(&mut self, channel: usize, message: MidiMessage);
-    fn gen_samples(&mut self, output_channel_count: usize, output: &mut [Frame]) -> usize;
+    fn gen_samples(&mut self, output_sample_rate: usize, output_channel_count: usize, output: &mut [f32]) -> usize;
 }
 
 pub struct MidiSong<'a> {
@@ -86,20 +87,20 @@ impl<'a> MidiSong<'a> {
     }
 
     // Found this here: https://codeberg.org/PieterPenninckx/midi-reader-writer/src/branch/main/src/midly_0_5.rs
-    // Combines all the tracks into one iterator and adds an offset so that we know the absolute time of the 
+    // Combines all the tracks into one iterator and adds an offset so that we know the absolute time of the next
     // event.
-    pub fn iter(&'a self) -> impl Iterator<Item = (u64, usize, TrackEventKind<'a>)> + 'a {
+    pub fn iter(&'a self) -> impl Iterator<Item = (u64, usize, usize, TrackEventKind<'a>)> + 'a {
         let mut track_index = 0;
         self.smf.tracks.iter()
             .map(|t| {
                 let mut offset = 0;
                 let result = t.iter().map(move |e| {
                     offset += e.delta.as_int() as u64;
-                    (offset, track_index, e.kind)
+                    (offset, e.delta.as_int() as usize, track_index, e.kind)
                 });
                 track_index += 1;
                 result
-            }).kmerge_by(|(offset1, _, _), (offset2, _, _)| offset1 < offset2)
+            }).kmerge_by(|(offset1, _, _, _), (offset2, _,  _, _)| offset1 < offset2)
 } 
 }
 
@@ -116,7 +117,11 @@ impl MidiPlayerOutput {
     }
 
     pub fn get_next_frame(&mut self) -> Option<Frame> {
-        self.consumer.pop()
+        let frame = self.consumer.pop();
+
+        //tracing::info!("MidiPlayerOutput: {:?}", frame);
+
+        frame
     }
 }
 
@@ -126,7 +131,7 @@ pub struct MidiPlayerThread {
 }
 
 impl MidiPlayerThread {
-    pub fn new<S: Synth + Send + 'static>(sample_rate: usize, channel_count: usize, receiver: Receiver<Command>, producer: ringbuf::Producer<Frame>, mut synth: S) -> Self {
+    pub fn new<S: Synth + Send + 'static>(sample_rate: usize, channel_count: usize, receiver: Receiver<Command>, mut producer: ringbuf::Producer<Frame>, mut synth: S) -> Self {
         let thread_handle = thread::spawn(move || {
             tracing::info!("MidiPlayer thread started.");
 
@@ -207,18 +212,11 @@ impl MidiPlayerThread {
                 // Breaking out of it means stopping playback and starting from the beginning (either the same or a new song).
                 // Puting this in it's own scope prevents the borrower complaining about song_bytes being modified below this.
                 {
-                    // // Keep track of how long a tick is.
-                    // let tick_length = match song.smf.header.timing {
-                    //     Timing::Timecode(fps, subframe) => {
-                    //         1.0 / fps.as_f32() / subframe as f32
-                    //     },
-                    //     Timing::Metrical(tbp) => {
-                    //         tbp
-                    //     }
-                    // }
-
                     // How many samples until the next event should be processed?
                     let mut samples_until_next_event = 0.0;
+
+                    // The next event to be processed.
+                    let mut next_event = None;
 
                     // How many samples to process per tick?
                     let mut samples_per_tick = 0.0;
@@ -263,26 +261,59 @@ impl MidiPlayerThread {
                         }
 
                         // Process a number of samples
-                        let samples_to_process = producer.remaining() / channel_count;
+                        let mut samples_to_process = producer.remaining() / channel_count;
 
                         // If we are paused, then produced empty samples.
                         if paused {
                             for _ in 0..samples_to_process {
-                                match channel_count {
-                                    1 => producer.push(Frame::Mono(0.0)),
-                                    _ => producer.push(Frame::Stereo(0.0, 0.0))
-                                }
+                                let frame = match channel_count {
+                                    1 => Frame::Mono(0.0),
+                                    _ => Frame::Stereo(0.0, 0.0)
+                                };
+                                producer.push(frame);
                             }
                             continue;
                         }
 
+                        // Don't process more than we should. We need to process the next event before doing too many.
+                        samples_to_process = samples_to_process.min((samples_until_next_event as f32).ceil() as usize);
+
+                        // Get the samples from the synth in chunks.
+                        const CHUNK_SIZE: usize = 4096;
+                        let mut buffer: [f32; CHUNK_SIZE] = [0.0; CHUNK_SIZE];
+                        let buffer_size_in_frames = CHUNK_SIZE / channel_count;
+
+                        tracing::info!("Processing {} samples.", samples_to_process);
+
+                        for samples_processed in (0..samples_to_process).step_by(buffer_size_in_frames) {
+                            let samples_to_gen = (samples_to_process - samples_processed).min(buffer_size_in_frames) * channel_count;
+                            
+                            // Clear the buffer.
+                            buffer = [0.0; CHUNK_SIZE];
+
+                            tracing::info!("Processing {} samples in chunk.", samples_to_gen);
+
+                            synth.gen_samples(sample_rate, channel_count, &mut buffer[..samples_to_gen]);
+                            for samples in buffer[..samples_to_gen].chunks_exact_mut(channel_count) {
+                                let frame = match channel_count {
+                                    1 => Frame::Mono(samples[0]),
+                                    _ => Frame::Stereo(samples[0], samples[1])
+                                };
+
+                                //tracing::info!("{:?}", frame);
+                                producer.push(frame).unwrap();
+                            }
+                        }
+                        samples_until_next_event -= samples_to_process as f32;
+
                         // Get the event.
                         if samples_until_next_event <= 0.0 {
-                            match event_iter.next() {
-                                None => break,
-                                Some((delta, channel, event)) => {
-                                    //tracing::info!("{:?}", event);
-                                    
+                            // Actually trigger the event.
+                            match next_event {
+                                None => (),
+                                Some((offset, _, _, event)) => {
+                                    tracing::info!("Offset: {}, {:?}", offset, event);
+
                                     // Process the event.
                                     match event {
                                         // Calculate the new samples_per_tick value based on this information.
@@ -291,8 +322,13 @@ impl MidiPlayerThread {
                                                 Timing::Metrical(tbp) => {
                                                     tracing::debug!("Tempo change to {} ticks per beat.", tbp);
 
-                                                    // TODO: Make sure this is right?
-                                                    ((micro_per_beat.as_int() / tbp.as_int() as u32) as usize * sample_rate) as f32 / 1000000.0
+                                                    // https://www.recordingblogs.com/wiki/midi-set-tempo-meta-message
+                                                    let beats_per_second = 1000000.0 / micro_per_beat.as_int() as f32;
+                                                    let ticks_per_beat = tbp.as_int() as f32;
+                                                    let ticks_per_second = beats_per_second * ticks_per_beat;
+                                                    let tick_duration = 1.0 / ticks_per_second;
+
+                                                    tick_duration * sample_rate as f32
                                                 },
                                                 _ => samples_per_tick
                                             }
@@ -304,11 +340,28 @@ impl MidiPlayerThread {
                                         },
                                         _ => () // Other messages are not important.
                                     }
-
-                                    // Record how many samples until the next event.
-                                    samples_until_next_event = delta as f32 * samples_per_tick;
                                 }
                             }
+
+                            // Get the next event and store it until we need to trigger it.
+                            next_event = event_iter.next();
+
+                            // Figure out how many samples to wait for the next event.
+                            match next_event {
+                                None => break,
+                                Some((_, delta, _, _)) => {
+                                    // Record how many samples until the next event.
+                                    // Add here because there'll potentially be a fractional sample leftover from the last event.
+                                    samples_until_next_event += delta as f32 * samples_per_tick;
+                                    tracing::info!("Samples until next event: {}", samples_until_next_event);
+                                }
+                            }
+
+                        } else {
+                            // Wait a little while until generate some more samples.
+                            const MAX_WAIT_TIME: Duration = Duration::from_millis(100);
+                            let time_until_next_event = Duration::from_secs_f32(samples_until_next_event as f32 / sample_rate as f32);
+                            thread::sleep(time_until_next_event.min(MAX_WAIT_TIME));
                         }
                     }
                 }
@@ -384,7 +437,7 @@ impl MidiPlayerController {
 }
 
 // Create a midi player with associated controllers and output.
-const BUFFER_LENGTH: f32 = 0.1;
+const BUFFER_LENGTH: f32 = 1.0;
 pub fn create_player<S: Synth + Send + 'static>(output_sample_rate: usize, output_channel_count: usize, synth: S) -> (MidiPlayerThread, MidiPlayerController, MidiPlayerOutput) {
     // Create consumer, producer pair to control the player.
     let ring_buf = ringbuf::RingBuffer::new((output_sample_rate as f32 * BUFFER_LENGTH) as usize);
