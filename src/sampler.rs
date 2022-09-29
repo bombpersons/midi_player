@@ -540,6 +540,11 @@ impl SamplerSynth {
     fn note_on(&mut self, channel: usize, midi_note: usize, vel: usize) {
         tracing::debug!("Key {} on at {} velocity", midi_note, vel);
         
+        // Actually I don't think this is neccessary.
+        // // Stop the note if it's already on. Some midi files don't give you note_off events
+        // // for playing repeat notes on the same track.
+        // self.note_off(channel, midi_note);
+
         // Add the note.
         self.keys.push(Key {
             channel,
@@ -568,7 +573,7 @@ impl SamplerSynth {
         // Get rid of any notes that have played more than the threshold of samples past where they stopped.
         self.keys.retain(|key| {
             if let Some(stopped_at) = key.samples_stopped_at {
-                stopped_at <= threshold
+                key.samples_played - stopped_at <= threshold
             } else {
                 true
             }   
@@ -596,6 +601,8 @@ impl Synth for SamplerSynth {
     fn gen_samples(&mut self, output_sample_rate: usize, output_channel_count: usize, output: &mut [f32]) -> usize {
         // Purge any finished notes.
         self.purge_finished_notes(output_sample_rate); // 1 second.
+
+        tracing::debug!("Generating {} samples. {} Keys turned on.", output.len() / output_channel_count, self.keys.len());
 
         // Get the samples from the sampler bank for each note.
         for key in self.keys.iter_mut() {

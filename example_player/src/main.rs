@@ -38,7 +38,7 @@ fn main() {
         .with_max_sample_rate().config();
 
     // Load the samples
-    let mut test_bank = SamplerBank::from_json_file(Path::new("test_samples/sampler_bank_tod.json")).unwrap();
+    let mut test_bank = SamplerBank::from_json_file(Path::new("test_samples/sampler_bank_melody.json")).unwrap();
     test_bank.load_samplers().unwrap();
     test_bank.resample(supported_config.sample_rate.0 as u16);
 
@@ -47,7 +47,16 @@ fn main() {
     let (player_thread, mut player_controller, mut player_output)
          = create_player(supported_config.sample_rate.0 as usize, supported_config.channels as usize, synth);
 
-    player_controller.load_from_file(Path::new("test_mid/tod.mid"));
+    // let mut player_controller;
+    // let mut player_output;
+    // {
+    //     let (player_thread, mut test_controller, mut test_output)
+    //         = create_player(supported_config.sample_rate.0 as usize, supported_config.channels as usize, synth);
+    //     player_controller = test_controller;
+    //     player_output = test_output;
+    // }
+
+    player_controller.load_from_file(Path::new("test_mid/ff9.mid"));
     player_controller.play();
 
     // build the stream
@@ -60,22 +69,17 @@ fn main() {
                 // Try to get a frame, if there is none show a warning that the samples are being
                 // generated too slowly.
                 let mut frame = player_output.get_next_frame();
-                while frame.is_none() {
-                    //tracing::warn!("Audio buffer is empty!");
-                    frame = player_output.get_next_frame();
-                }
 
                 //tracing::info!("CPal frame: {:?}", frame);
 
                 // Depending on mono or stereo write the samples to the audio device.
                 match frame {
-                    None => (),
-                    Some(Frame::Mono(sample)) => {
+                    Frame::Mono(sample) => {
                         for channel in 0..channel_count {
                             output_frame[channel] = sample;
                         }
                     },
-                    Some(Frame::Stereo(left, right)) => {
+                    Frame::Stereo(left, right) => {
                         for channel in 0..channel_count {
                             output_frame[channel] = match channel {
                                 0 => left,
