@@ -14,7 +14,7 @@ fn main() {
     let subscriber = FmtSubscriber::builder()
         // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
         // will be written to stdout.
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::INFO)
         // completes the builder.
         .finish();
     tracing::subscriber::set_global_default(subscriber)
@@ -38,16 +38,16 @@ fn main() {
         .with_max_sample_rate().config();
 
     // Load the samples
-    let mut test_bank = SamplerBank::from_json_file(Path::new("test_samples/sampler_bank_melody.json")).unwrap();
+    let mut test_bank = SamplerBank::from_json_file(Path::new("test_samples/sampler_bank_tod.json")).unwrap();
     test_bank.load_samplers().unwrap();
-    //test_bank.resample(supported_config.sample_rate.0 as u16);
+    test_bank.resample(supported_config.sample_rate.0 as u16);
 
     // Create the player.
     let synth = SamplerSynth::new(test_bank);
     let (player_thread, mut player_controller, mut player_output)
          = create_player(supported_config.sample_rate.0 as usize, supported_config.channels as usize, synth);
 
-    player_controller.load_from_file(Path::new("test_mid/ff9.mid"));
+    player_controller.load_from_file(Path::new("test_mid/tod.mid"));
     player_controller.play();
 
     // build the stream

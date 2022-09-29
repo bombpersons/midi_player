@@ -69,8 +69,14 @@ pub enum Frame {
 
 // A synthesizer that the midiplayer can use to generate samples.
 pub trait Synth {
+    // Accept a midi message.
     fn midi_message(&mut self, channel: usize, message: MidiMessage);
+
+    // Generate a number of samples.
     fn gen_samples(&mut self, output_sample_rate: usize, output_channel_count: usize, output: &mut [f32]) -> usize;
+
+    // rese the synthesizer state (i.e turn off all notes)
+    fn reset(&mut self);
 }
 
 pub struct MidiSong<'a> {
@@ -89,18 +95,18 @@ impl<'a> MidiSong<'a> {
     // Found this here: https://codeberg.org/PieterPenninckx/midi-reader-writer/src/branch/main/src/midly_0_5.rs
     // Combines all the tracks into one iterator and adds an offset so that we know the absolute time of the next
     // event.
-    pub fn iter(&'a self) -> impl Iterator<Item = (u64, usize, usize, TrackEventKind<'a>)> + 'a {
+    pub fn iter(&'a self) -> impl Iterator<Item = (u64, usize, TrackEventKind<'a>)> + 'a {
         let mut track_index = 0;
         self.smf.tracks.iter()
             .map(|t| {
                 let mut offset = 0;
                 let result = t.iter().map(move |e| {
                     offset += e.delta.as_int() as u64;
-                    (offset, e.delta.as_int() as usize, track_index, e.kind)
+                    (offset, track_index, e.kind)
                 });
                 track_index += 1;
                 result
-            }).kmerge_by(|(offset1, _, _, _), (offset2, _,  _, _)| offset1 < offset2)
+            }).kmerge_by(|(offset1, _, _), (offset2, _, _)| offset1 < offset2)
 } 
 }
 
@@ -165,7 +171,7 @@ impl MidiPlayerThread {
                             command = match receiver.recv() {
                                 Ok(c) => Some(c),
                                 Err(RecvError) => {
-                                    tracing::warn!("MidiPlayer receiver was disconnected");
+                                    tracing::warn!("MidiPlayer receiver was disconnected. Thread stopped.");
                                     break 'outer
                                 }
                             }
@@ -175,7 +181,16 @@ impl MidiPlayerThread {
                         // Other commands are only valid whilst a song is playing.
                         match command {
                             Some(Command::NewFromFile(filepath)) => {
-                                song_bytes = Some(fs::read(filepath).unwrap());
+                                song_bytes = match fs::read(&filepath) {
+                                    Ok(bytes) => {
+                                        tracing::info!("Bytes from {} loaded.", filepath.display());
+                                        Some(bytes)
+                                    },
+                                    Err(e) =>  {
+                                        tracing::warn!("Bytes could not be loaded from {}. IO Error: {}", filepath.display(), e);
+                                        Some(Vec::new())
+                                    }
+                                };
                             },
                             Some(Command::NewFromBuf(buf)) => {
                                 song_bytes = Some(buf);
@@ -199,6 +214,7 @@ impl MidiPlayerThread {
                         }
                     }
 
+                    // We can be assured that song_bytes is not null here due to the while loop above.
                     // Parse the song bytes.
                     MidiSong::from_bytes(song_bytes.as_ref().unwrap())
                 };
@@ -219,22 +235,29 @@ impl MidiPlayerThread {
                     let mut next_event = None;
 
                     // How many samples to process per tick?
-                    let mut samples_per_tick = 0.0;
-                    if let Timing::Timecode(fps, subframe)= song.smf.header.timing {
-                        samples_per_tick = (1.0 / fps.as_f32() / subframe as f32) * sample_rate as f32;
-                    }
+                    let mut samples_per_tick = match song.smf.header.timing {
+                        Timing::Timecode(fps, subframe) => (1.0 / fps.as_f32() / subframe as f32) * sample_rate as f32,
+                        _ => 0.0
+                    };
+                    tracing::info!("Midi timing header: {:?}", song.smf.header.timing);
 
+                    // Reset the synthesizer.
+                    synth.reset();
+
+                    // Iterate over all the midi events.
                     let mut event_iter = song.iter();
                     'event_iter: loop {
                         // Parse commands first...
                         for event in receiver.try_iter() {
                             match event {
                                 Command::NewFromFile(filepath) => {
+                                    tracing::info!("Loading song from {}...", filepath.display());
                                     pending_command = Some(Command::NewFromFile(filepath));
                                     unload_song = true;
                                     break 'event_iter
                                 }
                                 Command::NewFromBuf(buf) => {
+                                    tracing::info!("Loading song from buffer...");
                                     pending_command = Some(Command::NewFromBuf(buf));
                                     unload_song = true;
                                     break 'event_iter
@@ -250,8 +273,10 @@ impl MidiPlayerThread {
                                 },
                                 // In this context play means to unpause.
                                 Command::Play => {
+                                    if !paused {
+                                        tracing::info!("Already playing!");
+                                    }
                                     paused = false;
-                                    tracing::info!("Already playing!");
                                 },
                                 Command::Loop => {
                                     tracing::info!("Toggling loop to {}", !looping);
@@ -283,15 +308,13 @@ impl MidiPlayerThread {
                         let mut buffer: [f32; CHUNK_SIZE] = [0.0; CHUNK_SIZE];
                         let buffer_size_in_frames = CHUNK_SIZE / channel_count;
 
-                        tracing::info!("Processing {} samples.", samples_to_process);
+                        tracing::debug!("Processing {} samples.", samples_to_process);
 
                         for samples_processed in (0..samples_to_process).step_by(buffer_size_in_frames) {
                             let samples_to_gen = (samples_to_process - samples_processed).min(buffer_size_in_frames) * channel_count;
                             
                             // Clear the buffer.
                             buffer = [0.0; CHUNK_SIZE];
-
-                            tracing::info!("Processing {} samples in chunk.", samples_to_gen);
 
                             synth.gen_samples(sample_rate, channel_count, &mut buffer[..samples_to_gen]);
                             for samples in buffer[..samples_to_gen].chunks_exact_mut(channel_count) {
@@ -308,10 +331,13 @@ impl MidiPlayerThread {
 
                         // Get the event.
                         if samples_until_next_event <= 0.0 {
+                            // Store the offset of the previously processed event.
+                            let mut old_offset = 0;
+
                             // Actually trigger the event.
                             match next_event {
                                 None => (),
-                                Some((offset, _, _, event)) => {
+                                Some((offset, _, event)) => {
                                     tracing::info!("Offset: {}, {:?}", offset, event);
 
                                     // Process the event.
@@ -320,8 +346,6 @@ impl MidiPlayerThread {
                                         TrackEventKind::Meta(MetaMessage::Tempo(micro_per_beat)) => {
                                             samples_per_tick = match song.smf.header.timing {
                                                 Timing::Metrical(tbp) => {
-                                                    tracing::debug!("Tempo change to {} ticks per beat.", tbp);
-
                                                     // https://www.recordingblogs.com/wiki/midi-set-tempo-meta-message
                                                     let beats_per_second = 1000000.0 / micro_per_beat.as_int() as f32;
                                                     let ticks_per_beat = tbp.as_int() as f32;
@@ -331,7 +355,9 @@ impl MidiPlayerThread {
                                                     tick_duration * sample_rate as f32
                                                 },
                                                 _ => samples_per_tick
-                                            }
+                                            };
+
+                                            tracing::debug!("Tempo change to {} samples per tick.", samples_per_tick);
                                         },
                                         TrackEventKind::Meta(_) => (), // No other meta events are important.
                                         TrackEventKind::Midi { channel, message } => {
@@ -340,6 +366,8 @@ impl MidiPlayerThread {
                                         },
                                         _ => () // Other messages are not important.
                                     }
+
+                                    old_offset = offset;
                                 }
                             }
 
@@ -349,11 +377,13 @@ impl MidiPlayerThread {
                             // Figure out how many samples to wait for the next event.
                             match next_event {
                                 None => break,
-                                Some((_, delta, _, _)) => {
+                                Some((offset , _, _)) => {
+                                    let delta = offset - old_offset;
+
                                     // Record how many samples until the next event.
                                     // Add here because there'll potentially be a fractional sample leftover from the last event.
                                     samples_until_next_event += delta as f32 * samples_per_tick;
-                                    tracing::info!("Samples until next event: {}", samples_until_next_event);
+                                    tracing::debug!("Samples until next event: {}", samples_until_next_event);
                                 }
                             }
 

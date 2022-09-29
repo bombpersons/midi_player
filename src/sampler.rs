@@ -232,7 +232,6 @@ impl Sample {
     }
 
     pub fn get_sample_interpolated(&self, index: f32, channel: usize) -> Result<f32, SampleError> {
-        let sample_channels = self.get_sample_channel_count()?;
         let channel = self.get_channel(channel)?;
 
         let low_sample_index = index.floor() as usize;
@@ -244,12 +243,12 @@ impl Sample {
             Some(low_sample) => {
                 // Try and get the high sample and interpolate. If it doesn't exist, just return then low one.
                 match channel.samples.get(high_sample_index) {
-                    _ => Ok(*low_sample),
                     Some(high_sample) => {
                         // Interpolate between both samples.
                         let remainder = index - low_sample_index as f32;
                         Ok(low_sample + remainder * (high_sample - low_sample))
-                    }
+                    },
+                    _ => Ok(*low_sample),
                 }
             }
         }
@@ -265,7 +264,7 @@ impl Sample {
         }
     }
 
-    pub fn get_samples(&self, output_sample_rate: usize, output_channels: usize, desired_midi_note: u8, volume: f32, progress: usize, time_stopped: Option<usize>, output: &mut [f32]) -> Result<usize, SampleError> {
+    pub fn get_samples(&self, output_sample_rate: usize, output_channels: usize, desired_midi_note: u8, volume: f32, progress: usize, samples_stopped_at: Option<usize>, output: &mut [f32]) -> Result<usize, SampleError> {
         // Ratio of output samples per actual samples.
         let sample_rate = self.get_sample_rate()?;
         let sample_duration = 1.0 / sample_rate as f32;
@@ -289,6 +288,7 @@ impl Sample {
         while sampled < output_sample_num {
             // Calculate the sample index we need to be getting right now.
             let sample_index = progress as f32 * samples_per_output_sample as f32 * freq_ratio;
+            let progress_as_time = Duration::from_secs_f32(progress as f32 / output_sample_rate as f32);
 
             //tracing::info!("Sample_index: {}", sample_index);
 
@@ -300,19 +300,20 @@ impl Sample {
                         Ok(0.0)
                     },
                     Ok(mut sample) => {
-                        // // Fade in the first moment of the sample to avoid clipping.
-                        // const fade_in_duration: f32 = 0.01;
-                        // let fade_in = (progress.as_secs_f32() / fade_in_duration).min(1.0);
-                        // sample *= fade_in;
+                        // Fade in the first moment of the sample to avoid clipping.
+                        const FADE_IN_DURATION: f32 = 0.01;
+                        let fade_in = (progress_as_time.as_secs_f32() / FADE_IN_DURATION).min(1.0);
+                        sample *= fade_in;
 
-                        // // Fade out in the last moment of the sample to avoid clipping.
-                        // const fade_out_duration: f32 = 0.1;
-                        // if let Some(time_stopped) = time_stopped {
-                        //     let duration_since_stopped = (progress - time_stopped).max(Duration::ZERO);
-                        //     let fade_out = 1.0 - (duration_since_stopped.as_secs_f32() / fade_out_duration).min(1.0);
+                        // Fade out in the last moment of the sample to avoid clipping.
+                        const FADE_OUT_DURATION: f32 = 0.1;
+                        if let Some(samples_stopped_at) = samples_stopped_at {
+                            let time_stopped_at = Duration::from_secs_f32(samples_stopped_at as f32 / output_sample_rate as f32);
+                            let duration_since_stopped = (progress_as_time - time_stopped_at).max(Duration::ZERO);
+                            let fade_out = 1.0 - (duration_since_stopped.as_secs_f32() / FADE_OUT_DURATION).min(1.0);
 
-                        //     sample *= fade_out;
-                        // }
+                            sample *= fade_out;
+                        }
 
                         // Volume
                         sample *= volume;
@@ -594,7 +595,7 @@ impl Synth for SamplerSynth {
 
     fn gen_samples(&mut self, output_sample_rate: usize, output_channel_count: usize, output: &mut [f32]) -> usize {
         // Purge any finished notes.
-        self.purge_finished_notes(0);
+        self.purge_finished_notes(output_sample_rate); // 1 second.
 
         // Get the samples from the sampler bank for each note.
         for key in self.keys.iter_mut() {
@@ -620,9 +621,12 @@ impl Synth for SamplerSynth {
                 output).unwrap();
 
             key.samples_played += samples_generated;
-            tracing::info!("Key at {} samples", key.samples_played);
         }
 
         output.len()
+    }
+
+    fn reset(&mut self) {
+        self.keys = Vec::new();
     }
 }
