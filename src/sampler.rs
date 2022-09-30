@@ -1,26 +1,16 @@
-use std::collections::{HashSet, HashMap};
 use std::io::{Read, Seek};
-use std::mem::take;
-use std::ops::Index;
-use std::process::Output;
-use std::sync::mpsc::{Receiver, channel, Sender};
-use std::thread::{JoinHandle, self};
-use std::time::{Instant, Duration};
+use std::time::{Duration};
 use std::{io, fs};
 use std::path::{Path, PathBuf};
 use std::fs::File;
-use std::hash::Hash;
 
-use itertools::Itertools;
 use midly::MidiMessage;
-use ringbuf::{RingBuffer, Consumer};
 use rubato::{SincFixedIn, InterpolationParameters, InterpolationType, ResamplerConstructionError, Resampler, ResampleError};
 use serde::{Deserialize, Serialize};
 
-use timer::{Timer, Guard};
-use wav::{Header, BitDepth};
+use wav::{BitDepth};
 
-use crate::midi::{self, Synth, Frame};
+use crate::midi::{self, Synth};
 
 struct Channel {
     samples: Vec<f32>
@@ -208,14 +198,6 @@ impl Sample {
             None => Err(SampleError::ChannelOutOfBounds)
         }
     }
-    
-    pub fn get_sample_length(&self) -> Result<usize, SampleError> {
-        if self.data.is_none() {
-            return Err(SampleError::SampleNotLoaded);
-        }
-
-        Ok(self.data.as_ref().unwrap().sample_length)
-    }
 
     pub fn get_sample_rate(&self) -> Result<u16, SampleError> {
         if self.data.is_none() {
@@ -253,22 +235,10 @@ impl Sample {
             }
         }
     }
-
-    pub fn get_sample(&self, index: usize, channel: usize) -> Result<f32, SampleError> {
-        let sample_channels = self.get_sample_channel_count()?;
-        let channel = self.get_channel(channel)?;
-
-        match channel.samples.get(index) {
-            Some(sample) => Ok(*sample),
-            None => Err(SampleError::SampleOutOfBounds)
-        }
-    }
-
-    pub fn get_samples(&self, output_sample_rate: usize, output_channels: usize, desired_midi_note: u8, volume: f32, progress: usize, samples_stopped_at: Option<usize>, output: &mut [f32]) -> Result<usize, SampleError> {
+    
+    pub fn get_samples(&self, output_sample_rate: usize, output_channels: usize, desired_midi_note: u8, volume: f32, mut progress: usize, samples_stopped_at: Option<usize>, output: &mut [f32]) -> Result<usize, SampleError> {
         // Ratio of output samples per actual samples.
         let sample_rate = self.get_sample_rate()?;
-        let sample_duration = 1.0 / sample_rate as f32;
-        let output_sample_duration = Duration::from_secs_f32(1.0 / output_sample_rate as f32);
         let output_sample_num = output.len() / output_channels;
         let samples_per_output_sample = sample_rate as f32 / output_sample_rate as f32;
 
@@ -282,8 +252,6 @@ impl Sample {
         let freq_ratio = desired_freq / sample_freq;
 
         // When do we stop sampling?
-        let mut progress = progress;
-        let progess_end = progress + output_sample_num;
         let mut sampled = 0;
         while sampled < output_sample_num {
             // Calculate the sample index we need to be getting right now.
@@ -457,7 +425,7 @@ pub struct SamplerBank {
 impl SamplerBank {
     pub fn from_json_file(filepath: &Path) -> Result<Self, SamplerBankError> {
         // Try and open the file.
-        let mut file = File::open(filepath)?;
+        let file = File::open(filepath)?;
         Self::from_json_reader(file)
     }
 
@@ -591,7 +559,7 @@ impl Synth for SamplerSynth {
                     self.note_on(channel, key.as_int() as usize, vel.as_int() as usize);
                 }
             },
-            MidiMessage::NoteOff { key, vel } => {
+            MidiMessage::NoteOff { key, vel: _ } => {
                 self.note_off(channel, key.as_int() as usize);
             },
             _ => ()

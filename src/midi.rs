@@ -1,16 +1,13 @@
-use std::{path::Path, path::PathBuf, fs::{File, self}, io::Read, thread::{self, JoinHandle}, sync::{Arc, mpsc::{TryRecvError, RecvError}, atomic::{AtomicBool, self}}, collections::HashMap, num::ParseIntError, time::Duration, rc::Rc, ops::Add};
-use std::{io};
+use std::{path::Path, path::PathBuf, fs::{self}, thread::{self}, sync::{Arc, atomic::{AtomicBool, self}}, num::ParseIntError, time::Duration};
 use std::sync::mpsc::{Receiver, channel, Sender, RecvTimeoutError};
+use std::sync::mpsc::SendError;
 
 use itertools::Itertools;
-use midly::{Smf, TrackEvent, num::u28, TrackEventKind, Track, Timing, MetaMessage, MidiMessage};
-use ringbuf::RingBuffer;
-
-const RING_BUF_SIZE: usize = 2000;
+use midly::{Smf, TrackEventKind, Timing, MetaMessage, MidiMessage};
 
 pub fn midi_note_to_freq(note: u8) -> f32 {
-    const a: f32 = 440.0;
-    (a / 32.0) * f32::powf(2.0, (note as f32 - 9.0) / 12.0)
+    const A: f32 = 440.0;
+    (A / 32.0) * f32::powf(2.0, (note as f32 - 9.0) / 12.0)
 }
 
 #[derive(Debug)]
@@ -84,7 +81,7 @@ pub struct MidiSong<'a> {
 
 impl<'a> MidiSong<'a> {
     pub fn from_bytes(bytes: &'a Vec<u8>) -> Self {
-        let mut song = Self {
+        let song = Self {
             smf: Smf::parse(bytes).unwrap()
         };
 
@@ -321,7 +318,7 @@ impl MidiPlayerThread {
 
                     // Get the samples from the synth in chunks.
                     const CHUNK_SIZE: usize = 4096;
-                    let mut buffer: [f32; CHUNK_SIZE] = [0.0; CHUNK_SIZE];
+                    let mut buffer: [f32; CHUNK_SIZE];
                     let buffer_size_in_frames = CHUNK_SIZE / channel_count;
 
                     tracing::debug!("Processing {} samples. {}/{} in buffer.", samples_to_process, producer.len(), producer.capacity());
@@ -459,6 +456,15 @@ pub enum Command {
     NewFromBuf(Vec<u8>)
 }
 
+#[derive(Debug)]
+pub struct MidiPlayerControllerCommunicationError(SendError<Command>);
+
+impl From<SendError<Command>> for MidiPlayerControllerCommunicationError {
+    fn from(e: SendError<Command>) -> Self {
+        MidiPlayerControllerCommunicationError(e)
+    }
+}
+
 // Allows control over the thread actually playing the midi file.
 pub struct MidiPlayerController {
     sender: Sender<Command>
@@ -471,28 +477,34 @@ impl MidiPlayerController {
         }
     }
 
-    pub fn load_from_file(&mut self, filepath: &Path) {
-        self.sender.send(Command::NewFromFile(filepath.to_owned()));
+    pub fn load_from_file(&mut self, filepath: &Path) -> Result<(), MidiPlayerControllerCommunicationError> {
+        self.sender.send(Command::NewFromFile(filepath.to_owned()))?;
+        Ok(())
     }
 
-    pub fn load_from_buf(&mut self, buf: &Vec<u8>) {
-        self.sender.send(Command::NewFromBuf(buf.to_owned()));
+    pub fn load_from_buf(&mut self, buf: &Vec<u8>) -> Result<(), MidiPlayerControllerCommunicationError> {
+        self.sender.send(Command::NewFromBuf(buf.to_owned()))?;
+        Ok(())
     }
 
-    pub fn play(&mut self) {
-        self.sender.send(Command::Play);
+    pub fn play(&mut self) -> Result<(), MidiPlayerControllerCommunicationError> {
+        self.sender.send(Command::Play)?;
+        Ok(())
     }
 
-    pub fn pause(&mut self) {
-        self.sender.send(Command::Pause);
+    pub fn pause(&mut self) -> Result<(), MidiPlayerControllerCommunicationError> {
+        self.sender.send(Command::Pause)?;
+        Ok(())
     }
 
-    pub fn stop(&mut self) {
-        self.sender.send(Command::Stop);
+    pub fn stop(&mut self) -> Result<(), MidiPlayerControllerCommunicationError> {
+        self.sender.send(Command::Stop)?;
+        Ok(())
     }
 
-    pub fn toggle_loop(&mut self) {
-        self.sender.send(Command::Loop);
+    pub fn toggle_loop(&mut self) -> Result<(), MidiPlayerControllerCommunicationError> {
+        self.sender.send(Command::Loop)?;
+        Ok(())
     }
 }
 
