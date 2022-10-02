@@ -1,3 +1,4 @@
+use core::fmt;
 use std::{path::Path, path::PathBuf, fs::{self}, thread::{self}, sync::{Arc, atomic::{AtomicBool, self}}, num::ParseIntError, time::Duration};
 use std::sync::mpsc::{Receiver, channel, Sender, RecvTimeoutError};
 use std::sync::mpsc::SendError;
@@ -14,12 +15,22 @@ pub fn midi_note_to_freq(note: u8) -> f32 {
 pub enum NoteNameToMidiError {
     ParseIntError(ParseIntError),
     NameIncorrectLength,
-    InvalidNoteName
+    InvalidNoteLetter
 }
 
 impl From<ParseIntError> for NoteNameToMidiError {
     fn from(e: ParseIntError) -> Self {
         Self::ParseIntError(e)
+    }
+}
+
+impl fmt::Display for NoteNameToMidiError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::ParseIntError(e) => write!(f, "Error parsing note name. Expected characters not an integer. {}", e),
+            Self::NameIncorrectLength => write!(f, "Error parsing note name. Note name incorrect length."),
+            Self::InvalidNoteLetter => write!(f, "Error parsing note name. Note letter not valid. Sould be a to g#")
+        }
     }
 }
 
@@ -50,7 +61,7 @@ pub fn note_name_to_midi_note(name: &str) -> Result<u8, NoteNameToMidiError> {
         "f#" => 9,
         "g" => 10,
         "g#" => 11,
-        _ => Err(NoteNameToMidiError::InvalidNoteName)?
+        _ => Err(NoteNameToMidiError::InvalidNoteLetter)?
     };
 
     Ok(octave * 12 + offset + A0)
